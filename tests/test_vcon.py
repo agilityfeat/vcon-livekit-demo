@@ -338,6 +338,19 @@ def test_add_entities_analysis_meds_and_conditions_with_turn_ref():
         "MEDICAL_CONDITION",
     ]
     assert entry["body"][0]["text"] == "ibuprofen"
+    # Healthy path: no degraded marker.
+    assert "degraded" not in entry
+
+
+def test_add_entities_analysis_carries_degraded_marker_when_set():
+    builder = VConBuilder()
+    entry = builder.add_entities_analysis(
+        [], dialog_index=0, degraded="comprehend-medical call failed: AccessDenied"
+    )
+    # An empty body paired with a degraded marker is distinguishable from a real
+    # empty result (which omits the key).
+    assert entry["body"] == []
+    assert entry["degraded"] == "comprehend-medical call failed: AccessDenied"
 
 
 def test_add_summary_analysis_with_provenance():
@@ -350,6 +363,17 @@ def test_add_summary_analysis_with_provenance():
     assert entry["vendor"] == "aws-bedrock"
     assert entry["dialog"] == [0, 1, 2, 3]
     assert "headache" in entry["body"]
+    # Healthy path: no degraded marker.
+    assert "degraded" not in entry
+
+
+def test_add_summary_analysis_carries_degraded_marker_when_set():
+    builder = VConBuilder()
+    entry = builder.add_summary_analysis(
+        "", dialog_indices=[0], degraded="bedrock invoke_model failed: ThrottlingException"
+    )
+    assert entry["body"] == ""
+    assert entry["degraded"] == "bedrock invoke_model failed: ThrottlingException"
 
 
 def test_analysis_helpers_append_in_order():

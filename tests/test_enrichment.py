@@ -8,6 +8,7 @@ tests are meaningful: they fail if the corresponding logic is reverted.
 from vcon_agent.enrichment import (
     extract_min_entities,
     map_turns_by_timestamp_overlap,
+    s3_location_from_transcribe_uri,
     summary_prompt_from_dialog,
     summary_text_from_bedrock_response,
     transcript_text_from_transcribe_result,
@@ -133,6 +134,44 @@ def test_transcript_text_from_transcribe_result_joins_multiple():
 def test_transcript_text_from_transcribe_result_empty():
     assert transcript_text_from_transcribe_result({}) == ""
     assert transcript_text_from_transcribe_result({"results": {}}) == ""
+
+
+# ----------------------------------------------------------------------------
+# s3_location_from_transcribe_uri
+# ----------------------------------------------------------------------------
+
+
+def test_s3_location_from_s3_scheme_uri():
+    assert s3_location_from_transcribe_uri(
+        "s3://my-bucket/medical/job.json"
+    ) == ("my-bucket", "medical/job.json")
+
+
+def test_s3_location_from_path_style_https_uri():
+    # Path style: s3.<region>.amazonaws.com/<bucket>/<key>
+    assert s3_location_from_transcribe_uri(
+        "https://s3.us-east-1.amazonaws.com/my-bucket/medical/job.json"
+    ) == ("my-bucket", "medical/job.json")
+
+
+def test_s3_location_from_virtual_hosted_https_uri():
+    # Virtual-hosted style: <bucket>.s3.<region>.amazonaws.com/<key>
+    assert s3_location_from_transcribe_uri(
+        "https://my-bucket.s3.us-east-1.amazonaws.com/medical/job.json"
+    ) == ("my-bucket", "medical/job.json")
+
+
+def test_s3_location_strips_query_string():
+    assert s3_location_from_transcribe_uri(
+        "https://s3.us-east-1.amazonaws.com/my-bucket/medical/job.json?X-Amz-Signature=abc"
+    ) == ("my-bucket", "medical/job.json")
+
+
+def test_s3_location_returns_none_for_unrecognized():
+    assert s3_location_from_transcribe_uri("") is None
+    assert s3_location_from_transcribe_uri(None) is None
+    assert s3_location_from_transcribe_uri("s3://only-bucket") is None
+    assert s3_location_from_transcribe_uri("https://example.com/no/s3/here") is None
 
 
 # ----------------------------------------------------------------------------

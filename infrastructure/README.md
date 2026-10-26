@@ -59,6 +59,17 @@ The pipeline still runs end to end without this (the `bedrock-step` falls back t
 an empty summary if the model is unavailable), but a real `bedrock:InvokeModel`
 call only returns a summary once the model is enabled.
 
+**Fail-open with a degraded marker.** Both the `comprehend-step` and the
+`bedrock-step` fail OPEN: if the model call raises (access denied, throttled, or
+the Bedrock model is not enabled) the step returns an empty result rather than
+failing the whole execution, so the demo still reaches `Merge` and `SUCCEEDED`.
+To keep that legible, the branch attaches a `degraded` reason string to its
+`analysis[]` entry (`entities` or `summary`). The key is present ONLY on a
+failure, so a consumer can tell a genuinely empty result (no meds mentioned, no
+summary) from a silent model failure. On a healthy run the key is absent, and
+`validate-live.sh` asserts that. Transcription, by contrast, fails CLOSED through
+the dedicated `TranscriptionFailed` state.
+
 ## Deploy (one command)
 
 ```bash
@@ -246,8 +257,9 @@ summary and exits non-zero if any check failed. It verifies:
   status is `SUCCEEDED`, and confirms the output preserves the top-level
   `"vcon": "0.0.1"` version and carries the three analysis entries in order
   (`transcript`, `entities`, `summary`) with the clinical transcript marked
-  `authoritative`. Note the canned input has **no real recording**, so the
-  pipeline exercises the canned-transcript stub path on the live stack too.
+  `authoritative` and with **no `degraded` markers** on a healthy run. Note the
+  canned input has **no real recording**, so the pipeline exercises the
+  canned-transcript stub path on the live stack too.
 
 ### What can be validated offline vs. what needs live AWS
 
@@ -284,9 +296,23 @@ summary and exits non-zero if any check failed. It verifies:
   *Production:* the full entity set with RxNorm / ICD-10-CM linking and
   confidence thresholds.
 - 🩹 **Turn-index provenance mapped by timestamp overlap** (simple alignment of
-  medical segments to dialog turns). → *Production:* robust alignment between the
-  diarized medical transcript and the live turns (word-level timing, speaker
-  reconciliation).
+  medical segments to dialog turns). The segment-level mapper
+  (`enrichment.map_turns_by_timestamp_overlap`) is the production-direction
+  logic and is unit-tested, but it is intentionally NOT wired into the demo
+  pipeline yet: the inline merge/comprehend steps use coarser attribution (the
+  transcript covers every text turn, entities pin to the first patient turn)
+  because the canned/demo Transcribe path does not emit per-segment timings to
+  feed it. → *Production:* robust alignment between the diarized medical
+  transcript and the live turns (word-level timing, speaker reconciliation),
+  fed through that mapper.
+- 🩹 **Single-turn entity attribution** (all Comprehend entities pinned to the
+  first patient text turn). → *Production:* per-entity character offsets mapped
+  to the turn each entity actually came from.
+- 🩹 **Analysis fails open with a `degraded` marker** (Comprehend / Bedrock
+  failures yield an empty result plus a `degraded` reason on the entry, so the
+  demo still finishes while the failure stays visible). → *Production:* a
+  `Catch` to a visible alarm state plus retries so an operator is paged, rather
+  than fail-open.
 - 🩹 **SSE-S3 default encryption**, no customer-managed KMS key. →
   *Production:* SSE-KMS with a CMK, key policy, and separate access scopes for
   full vs. redacted vCons.

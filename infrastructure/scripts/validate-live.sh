@@ -294,8 +294,17 @@ transcript = vcon["analysis"][0]
 if transcript.get("authoritative") is not True:
     print("transcript analysis is not marked authoritative", file=sys.stderr)
     sys.exit(1)
+
+# On a HEALTHY run, the entities and summary entries must NOT carry a
+# "degraded" marker. That marker is only present when the Comprehend or Bedrock
+# step failed open (model access denied / throttled / model not enabled), so
+# its presence here would mean the canned end-to-end run silently lost analysis.
+for a in vcon.get("analysis", []):
+    if a.get("degraded"):
+        print("analysis entry %r is degraded: %r" % (a.get("type"), a.get("degraded")), file=sys.stderr)
+        sys.exit(1)
 '; then
-      pass 'execution output preserves "vcon": "0.0.1" and has analysis [transcript, entities, summary] in order (transcript authoritative)'
+      pass 'execution output preserves "vcon": "0.0.1" and has analysis [transcript, entities, summary] in order (transcript authoritative, no degraded markers)'
     else
       fail 'execution output did not match: expected "vcon": "0.0.1" and analysis [transcript, entities, summary]'
     fi

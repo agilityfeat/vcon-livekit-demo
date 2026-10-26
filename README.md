@@ -270,6 +270,13 @@ Comprehend and Bedrock run as a **parallel** branch; a final merge step writes
 the three analysis entries in a deterministic order: `transcript`, `entities`,
 `summary`.
 
+Transcription fails **closed** (a dedicated `Fail` state), but Comprehend and
+Bedrock fail **open**: if a model call is denied, throttled, or the Bedrock
+model is not enabled, the step returns an empty result and attaches a `degraded`
+reason string to its `analysis[]` entry instead of failing the run. The marker
+is present only on a failure, so an empty entities list or summary with a
+`degraded` marker is distinguishable from a genuinely empty result.
+
 ### Dual transcript: a feature, not a bug
 
 This is where "why not just the live transcript?" gets answered. The real-time
@@ -301,8 +308,20 @@ inline Lambda body. The live end-to-end check is
 - 🩹 **Optional canned-transcript stub** so the pipeline is runnable without a
   real recording. → *Production:* the real job, or AWS HealthScribe for
   clinician-grade notes + transcript in one service.
-- 🩹 **Provenance = simple turn-index references** mapped by timestamp overlap. →
+- 🩹 **Provenance = simple turn-index references** mapped by timestamp overlap.
+  The segment-level mapper (`enrichment.map_turns_by_timestamp_overlap`) is the
+  production-direction logic and is unit-tested, but it is intentionally NOT
+  wired into the demo pipeline yet (the inline steps use coarser attribution
+  because the canned Transcribe path emits no per-segment timings). →
   *Production:* robust alignment between the diarized medical transcript and the
-  live turns.
+  live turns, fed through that mapper.
+- 🩹 **Single-turn entity attribution** (all entities pinned to the first
+  patient text turn). → *Production:* per-entity offsets mapped to the turn each
+  entity came from.
 - 🩹 **Comprehend Medical kept to meds + conditions.** → *Production:* the full
   entity set with RxNorm / ICD-10-CM linking.
+- 🩹 **Analysis fails open with a `degraded` marker** (Comprehend / Bedrock
+  failures return an empty result plus a `degraded` reason, keeping the demo
+  runnable while the failure stays visible). → *Production:* a `Catch` to a
+  visible alarm state plus retries, so operators are paged rather than reading a
+  silently empty result.

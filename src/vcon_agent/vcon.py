@@ -375,6 +375,7 @@ class VConBuilder:
         entities: Sequence[Dict[str, Any]],
         dialog_index: int,
         vendor: str = "aws-comprehend-medical",
+        degraded: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Append an 'entities' analysis object scoped to one dialog turn.
 
@@ -385,10 +386,20 @@ class VConBuilder:
         the shaper kept it). The whole vCon still references parties/turns by
         index, never embedded identities.
 
+        When the Comprehend step fails open (model access denied, throttling)
+        it passes a ``degraded`` reason string; it is attached to the entry so a
+        consumer can distinguish a real empty entity list from a silent failure.
+        A ``None`` reason omits the key entirely (the healthy case).
+
         🩹 Shortcut: the entity set is kept minimal to meds + conditions
         (MEDICATION + MEDICAL_CONDITION), shaped by
         enrichment.extract_min_entities. → Production: the full Comprehend Medical
         entity set with RxNorm / ICD-10-CM linking and confidence thresholds.
+
+        🩹 Shortcut: a failed analysis fails OPEN to an empty list with a
+        ``degraded`` marker so the demo pipeline still finishes. → Production: a
+        Catch to a visible alarm state plus retries, so an operator is paged
+        rather than reading a silently empty result.
         """
         entry: Dict[str, Any] = {
             "type": "entities",
@@ -399,6 +410,8 @@ class VConBuilder:
             "dialog": [int(dialog_index)],
             "body": [dict(e) for e in entities],
         }
+        if degraded:
+            entry["degraded"] = degraded
         self._doc["analysis"].append(entry)
         return entry
 
@@ -407,6 +420,7 @@ class VConBuilder:
         summary_text: str,
         dialog_indices: Sequence[int],
         vendor: str = "aws-bedrock",
+        degraded: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Append a 'summary' analysis object with turn-index provenance.
 
@@ -415,9 +429,19 @@ class VConBuilder:
         built from via ``dialog`` so the summary is traceable back to the exact
         turns it summarizes.
 
+        When the Bedrock step fails open (model not enabled, throttled) it passes
+        a ``degraded`` reason string; it is attached to the entry so a consumer
+        can distinguish an intentionally empty summary from a silent failure. A
+        ``None`` reason omits the key entirely (the healthy case).
+
         🩹 Shortcut: a single free-text summary over the whole dialog.
         → Production: structured clinical note sections (HPI, assessment, plan)
         with per-section provenance and model/version pinning.
+
+        🩹 Shortcut: a failed call fails OPEN to an empty summary with a
+        ``degraded`` marker so the demo pipeline still finishes. → Production: a
+        Catch to a visible alarm state plus retries, so an operator is paged
+        rather than reading a silently empty result.
         """
         entry: Dict[str, Any] = {
             "type": "summary",
@@ -426,6 +450,8 @@ class VConBuilder:
             "body": summary_text,
             "mimetype": "text/plain",
         }
+        if degraded:
+            entry["degraded"] = degraded
         self._doc["analysis"].append(entry)
         return entry
 

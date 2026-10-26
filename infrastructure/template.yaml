@@ -445,13 +445,19 @@ Resources:
           # Transcribe result JSON is
           #   {"results": {"transcripts": [{"transcript": "<text>"}, ...]}}.
           #
+          # The completed job is started with OutputBucketName set, so its
+          # TranscriptFileUri points at an auth-required S3 object. We read it
+          # through the S3 client (get_object) via s3_location_from_transcribe_uri
+          # (mirrored from enrichment.py), NOT an unauthenticated urllib fetch,
+          # which would 403 against the signed S3 URL.
+          #
           # Unwrap convention: one event.get("vcon", event) yields the vCon doc.
           import json
-          import urllib.request
 
           import boto3
 
           _TRANSCRIBE = boto3.client("transcribe")
+          _S3 = boto3.client("s3")
 
 
           def _transcript_text_from_transcribe_result(result_json):
@@ -463,6 +469,37 @@ Resources:
                   if t.get("transcript")
               ]
               return " ".join(parts).strip()
+
+
+          def _s3_location_from_transcribe_uri(uri):
+              if not isinstance(uri, str) or not uri:
+                  return None
+              if uri.startswith("s3://"):
+                  rest = uri[len("s3://"):]
+                  parts = rest.split("/", 1)
+                  if len(parts) == 2 and parts[0] and parts[1]:
+                      return (parts[0], parts[1])
+                  return None
+              if uri.startswith("https://") or uri.startswith("http://"):
+                  without_scheme = uri.split("://", 1)[1]
+                  host, _, path = without_scheme.partition("/")
+                  path = path.split("?", 1)[0]
+                  if not host or not path:
+                      return None
+                  labels = host.split(".")
+                  if len(labels) >= 2 and (
+                      labels[1] == "s3" or labels[1].startswith("s3-")
+                  ):
+                      bucket = labels[0]
+                      if bucket and path:
+                          return (bucket, path)
+                      return None
+                  if labels and (labels[0] == "s3" or labels[0].startswith("s3-")):
+                      parts = path.split("/", 1)
+                      if len(parts) == 2 and parts[0] and parts[1]:
+                          return (parts[0], parts[1])
+                      return None
+              return None
 
 
           def handler(event, context):
@@ -491,9 +528,11 @@ Resources:
                   status = job.get("TranscriptionJobStatus", "IN_PROGRESS")
                   if status == "COMPLETED":
                       uri = job.get("Transcript", {}).get("TranscriptFileUri")
-                      if uri:
-                          with urllib.request.urlopen(uri) as fh:
-                              result_json = json.loads(fh.read().decode("utf-8"))
+                      location = _s3_location_from_transcribe_uri(uri)
+                      if location:
+                          bucket, key = location
+                          obj = _S3.get_object(Bucket=bucket, Key=key)
+                          result_json = json.loads(obj["Body"].read())
                           transcript_text = _transcript_text_from_transcribe_result(
                               result_json
                           )
@@ -573,12 +612,23 @@ Resources:
               transcript_text = event.get("transcript_text", "") or ""
 
               entities = []
+              # 🩹 Fail-open for demo-runnability: a Comprehend Medical failure
+              # (model access denied, throttling, etc.) returns EMPTY entities
+              # rather than failing the whole execution, BUT we carry a degraded
+              # marker so an operator can tell a real "no meds/conditions
+              # mentioned" apart from a silent failure. → Production: a Catch to a
+              # visible alarm state, retries with backoff, and a hard failure path
+              # surfaced to operators.
+              degraded = None
               if transcript_text:
                   try:
                       resp = _CM.detect_entities_v2(Text=transcript_text)
                       entities = _extract_min_entities(resp)
-                  except Exception:
+                  except Exception as exc:
                       entities = []
+                      degraded = "comprehend-medical call failed: {}".format(
+                          type(exc).__name__
+                      )
 
               return {
                   "vcon": vcon,
@@ -586,6 +636,7 @@ Resources:
                   "entities": entities,
                   "entities_dialog_index": _first_patient_turn_index(vcon),
                   "transcript_text": transcript_text,
+                  "entities_degraded": degraded,
               }
       Tags:
         - Key: Project
@@ -684,10 +735,14 @@ Resources:
               prompt = _summary_prompt_from_dialog(vcon.get("dialog", []))
 
               summary_text = ""
-              # 🩹 Shortcut: if Bedrock is unavailable (model not enabled, etc.)
-              # fall back to an empty summary rather than failing the pipeline.
-              # → Production: a pinned model id, token accounting, and a hard
-              # failure path surfaced to operators.
+              # 🩹 Fail-open for demo-runnability: if Bedrock is unavailable
+              # (model not enabled, throttled, etc.) fall back to an EMPTY summary
+              # rather than failing the pipeline, BUT carry a degraded marker so
+              # an operator can tell an intentionally empty summary apart from a
+              # silent model failure. → Production: a pinned model id, token
+              # accounting, retries, and a hard failure path surfaced to
+              # operators.
+              degraded = None
               try:
                   body = json.dumps(
                       {
@@ -704,14 +759,18 @@ Resources:
                   )
                   payload = json.loads(resp["body"].read())
                   summary_text = _summary_text_from_bedrock_response(payload)
-              except Exception:
+              except Exception as exc:
                   summary_text = ""
+                  degraded = "bedrock invoke_model failed: {}".format(
+                      type(exc).__name__
+                  )
 
               return {
                   "vcon": vcon,
                   "step": "bedrock",
                   "summary_text": summary_text,
                   "summary_dialog_indices": _dialog_indices(vcon),
+                  "summary_degraded": degraded,
               }
       Tags:
         - Key: Project
@@ -737,7 +796,8 @@ Resources:
           # Merge branch outputs into analysis[] with turn-index provenance. The
           # analysis entry shapes mirror vcon.py's add_transcript_analysis /
           # add_entities_analysis / add_summary_analysis (type, vendor,
-          # authoritative flag, dialog turn-index provenance, body).
+          # authoritative flag, dialog turn-index provenance, body, and an
+          # optional `degraded` marker carried from a branch that failed open).
           #
           # The clinical Transcribe Medical transcript is added to analysis[]
           # marked authoritative and sits ALONGSIDE the live Deepgram transcript
@@ -790,30 +850,38 @@ Resources:
                   }
               )
 
-              # 2) entities (Comprehend Medical, meds + conditions).
+              # 2) entities (Comprehend Medical, meds + conditions). A
+              # `degraded` marker is attached ONLY when the Comprehend branch
+              # failed open, so an operator can tell real emptiness from a silent
+              # model-access/throttle failure.
               entities = comprehend.get("entities", []) or []
               entities_index = comprehend.get("entities_dialog_index", 0)
-              vcon["analysis"].append(
-                  {
-                      "type": "entities",
-                      "vendor": "aws-comprehend-medical",
-                      "dialog": [int(entities_index)],
-                      "body": entities,
-                  }
-              )
+              entities_entry = {
+                  "type": "entities",
+                  "vendor": "aws-comprehend-medical",
+                  "dialog": [int(entities_index)],
+                  "body": entities,
+              }
+              entities_degraded = comprehend.get("entities_degraded")
+              if entities_degraded:
+                  entities_entry["degraded"] = entities_degraded
+              vcon["analysis"].append(entities_entry)
 
-              # 3) summary (Bedrock physician summary).
+              # 3) summary (Bedrock physician summary). Same degraded-marker
+              # treatment as entities above.
               summary_text = bedrock.get("summary_text", "") or ""
               summary_indices = bedrock.get("summary_dialog_indices", covered) or covered
-              vcon["analysis"].append(
-                  {
-                      "type": "summary",
-                      "vendor": "aws-bedrock",
-                      "dialog": [int(i) for i in summary_indices],
-                      "body": summary_text,
-                      "mimetype": "text/plain",
-                  }
-              )
+              summary_entry = {
+                  "type": "summary",
+                  "vendor": "aws-bedrock",
+                  "dialog": [int(i) for i in summary_indices],
+                  "body": summary_text,
+                  "mimetype": "text/plain",
+              }
+              summary_degraded = bedrock.get("summary_degraded")
+              if summary_degraded:
+                  summary_entry["degraded"] = summary_degraded
+              vcon["analysis"].append(summary_entry)
 
               return {"vcon": vcon, "step": "merge", "status": "ok"}
       Tags:

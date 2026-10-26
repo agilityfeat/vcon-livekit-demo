@@ -3,8 +3,9 @@
 This module is the AUTHORITATIVE, unit-tested copy of the correctness-critical
 logic each enrichment step runs: mapping medical-transcript segments back to
 dialog turns for provenance, shaping a Comprehend Medical response down to the
-minimal entity set, pulling text out of a Transcribe Medical result, building the
-Bedrock summary prompt, and pulling the summary text out of a Bedrock response.
+minimal entity set, parsing the Transcribe Medical output URI into an S3
+location, pulling text out of a Transcribe Medical result, building the Bedrock
+summary prompt, and pulling the summary text out of a Bedrock response.
 
 Why a separate pure module? The real pipeline runs as inline-code Lambdas inside
 the CloudFormation template (``Code.ZipFile``), which CANNOT import this repo
@@ -54,6 +55,17 @@ def map_turns_by_timestamp_overlap(
     🩹 Shortcut: provenance is a simple timestamp-overlap mapping against
     turn start times. → Production: robust alignment between the diarized medical
     transcript and the live turns (word-level timing and speaker reconciliation).
+
+    SCAFFOLDING NOTE: this is the production-direction, segment-level provenance
+    mapping. It is intentionally NOT wired into the shipped demo pipeline yet.
+    The inline ``MergeFunction`` / ``ComprehendFunction`` in
+    ``infrastructure/template.yaml`` use coarser attribution (the transcript
+    covers every text turn, entities pin to the first patient turn) because the
+    canned/demo Transcribe path does not emit per-segment timings to feed this
+    mapper. Keeping the helper here, unit-tested, documents and reserves the
+    real mapping so the tested logic and the shipped behavior do not silently
+    diverge: when the pipeline starts emitting real medical segments, the merge
+    step feeds them through this function instead of the coarse attribution.
     """
     # Precompute each dialog turn's [start, end) interval once.
     intervals: List[Optional[tuple]] = []
@@ -150,6 +162,62 @@ def transcript_text_from_transcribe_result(result_json: Dict[str, Any]) -> str:
     transcripts = results.get("transcripts") or []
     parts = [t.get("transcript", "") for t in transcripts if t.get("transcript")]
     return " ".join(parts).strip()
+
+
+def s3_location_from_transcribe_uri(uri: str) -> Optional[tuple]:
+    """Parse a Transcribe Medical ``TranscriptFileUri`` into ``(bucket, key)``.
+
+    When ``StartMedicalTranscriptionJob`` is called with ``OutputBucketName``
+    set, the completed job's ``Transcript.TranscriptFileUri`` points at the
+    result object in that customer bucket, and reading it requires SigV4-signed
+    S3 access, NOT an unauthenticated HTTP fetch. This helper turns the URI into
+    the ``(bucket, key)`` pair the pipeline uses to read the result through the
+    S3 client (``get_object``). An unauthenticated ``urllib`` fetch of that URI
+    would 403 on a real deployment.
+
+    Two URI shapes are handled:
+      * the S3 scheme form ``s3://<bucket>/<key>``
+      * the HTTPS virtual-hosted / path-style forms AWS returns, e.g.
+        ``https://s3.<region>.amazonaws.com/<bucket>/<key>`` and
+        ``https://<bucket>.s3.<region>.amazonaws.com/<key>``
+
+    Returns ``(bucket, key)`` or ``None`` if the URI is not a recognizable S3
+    location. Pure and dependency-free so the parsing is testable offline.
+    """
+    if not isinstance(uri, str) or not uri:
+        return None
+
+    # s3://<bucket>/<key>
+    if uri.startswith("s3://"):
+        rest = uri[len("s3://"):]
+        parts = rest.split("/", 1)
+        if len(parts) == 2 and parts[0] and parts[1]:
+            return (parts[0], parts[1])
+        return None
+
+    if uri.startswith("https://") or uri.startswith("http://"):
+        without_scheme = uri.split("://", 1)[1]
+        host, _, path = without_scheme.partition("/")
+        path = path.split("?", 1)[0]  # drop any query string
+        if not host or not path:
+            return None
+        # Virtual-hosted style: <bucket>.s3... or <bucket>.s3-<region>...
+        # The host's leading label is the bucket when the next label is "s3"
+        # (or "s3-<region>").
+        labels = host.split(".")
+        if len(labels) >= 2 and (labels[1] == "s3" or labels[1].startswith("s3-")):
+            bucket = labels[0]
+            key = path
+            if bucket and key:
+                return (bucket, key)
+            return None
+        # Path style: s3.<region>.amazonaws.com/<bucket>/<key>
+        if labels and (labels[0] == "s3" or labels[0].startswith("s3-")):
+            parts = path.split("/", 1)
+            if len(parts) == 2 and parts[0] and parts[1]:
+                return (parts[0], parts[1])
+            return None
+    return None
 
 
 def summary_prompt_from_dialog(dialog_turns: Sequence[Dict[str, Any]]) -> str:
