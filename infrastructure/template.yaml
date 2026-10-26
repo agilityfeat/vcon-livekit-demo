@@ -1,10 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
 
 # =============================================================================
-# Spec 0 - Cloud infrastructure for the vCon + LiveKit demo
+# Cloud infrastructure for the vCon + LiveKit demo
 # -----------------------------------------------------------------------------
-# A single, flat CloudFormation template (teaching artifact) that provisions the
-# minimal AWS backend the local application consumes:
+# A single, flat CloudFormation template that provisions the minimal AWS backend
+# the local application consumes:
 #
 #   * S3 bucket        - holds recordings (from LiveKit Egress) plus the
 #                        skeleton / enriched / redacted vCon JSON documents,
@@ -28,7 +28,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 # =============================================================================
 
 Description: >-
-  Spec 0 cloud-infra foundation for the vCon + LiveKit demo: an S3 bucket
+  Cloud infrastructure for the vCon + LiveKit demo: an S3 bucket
   (versioning + SSE-S3), a Step Functions state machine orchestrating a stubbed
   enrichment pipeline, inline-code pipeline Lambda functions, and least-needed
   IAM roles for Transcribe Medical / Comprehend Medical / Bedrock / S3.
@@ -65,7 +65,7 @@ Resources:
   # customer-managed KMS key. Production would use SSE-KMS with a CMK, a key
   # policy, and separate access scopes for full vs. redacted vCons.
   #
-  # Versioning is enabled as cheap insurance against the Egress overwrite bug.
+  # Versioning is enabled as cheap insurance against accidental object overwrites.
   # ---------------------------------------------------------------------------
   RecordingsBucket:
     Type: AWS::S3::Bucket
@@ -363,7 +363,7 @@ Resources:
               LogGroupArn: !GetAtt StateMachineLogGroup.Arn
       DefinitionString: !Sub |
         {
-          "Comment": "Stubbed vCon enrichment pipeline (Spec 0).",
+          "Comment": "Stubbed vCon enrichment pipeline.",
           "StartAt": "Transcribe",
           "States": {
             "Transcribe": {

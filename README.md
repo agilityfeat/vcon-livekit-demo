@@ -1,13 +1,13 @@
-# Spec 0 — Cloud infrastructure (CloudFormation)
+# Cloud infrastructure (CloudFormation)
 
-A single, flat CloudFormation template (`template.yaml`) that provisions the
-minimal AWS backend the vCon + LiveKit demo consumes. It deploys with one
-command, exposes the identifiers the local app needs as stack **Outputs**, and
-tears down cleanly.
+A single, flat CloudFormation template (`infrastructure/template.yaml`) that
+provisions the minimal AWS backend the vCon + LiveKit demo consumes. It deploys
+with one command, exposes the identifiers the local app needs as stack
+**Outputs**, and tears down cleanly.
 
-This is a teaching artifact: everything lives in one template, Lambda code is
-inlined, and IAM is deliberately broad for readability. The acknowledged
-shortcuts and their production counterparts are listed at the end.
+Everything lives in one template, Lambda code is inlined, and IAM is kept broad
+for readability. The acknowledged shortcuts and their production counterparts
+are listed at the end.
 
 ## What the template creates
 
@@ -49,7 +49,7 @@ The stubbed pipeline runs end to end without this, but a real
 
 ```bash
 aws cloudformation deploy \
-  --template-file template.yaml \
+  --template-file infrastructure/template.yaml \
   --stack-name vcon-livekit-demo \
   --capabilities CAPABILITY_IAM
 ```
@@ -58,7 +58,7 @@ Optional parameter overrides:
 
 ```bash
 aws cloudformation deploy \
-  --template-file template.yaml \
+  --template-file infrastructure/template.yaml \
   --stack-name vcon-livekit-demo \
   --capabilities CAPABILITY_IAM \
   --parameter-overrides ProjectName=vcon-livekit-demo Environment=dev
@@ -91,8 +91,8 @@ cp .env.example .env
 
 ## S3 unique-key-per-run convention
 
-To avoid collisions and the Egress overwrite bug, every run writes objects under
-a **unique key prefix** built from the room name, the session start, and a
+To avoid collisions and accidental overwrites, every run writes objects under a
+**unique key prefix** built from the room name, the session start, and a
 timestamp:
 
 ```
@@ -153,23 +153,22 @@ removes everything the template created.
 authoritative local check for this template:
 
 ```bash
-pip3 install --user cfn-lint      # or install into a virtualenv
-cfn-lint template.yaml            # expect zero errors
+pip3 install --user cfn-lint              # or install into a virtualenv
+cfn-lint infrastructure/template.yaml     # expect zero errors
 # convenience wrapper:
-./scripts/validate.sh
+./infrastructure/scripts/validate.sh
 ```
 
-### What was validated in-sandbox vs. what needs live AWS
+### What can be validated offline vs. what needs live AWS
 
-- **Validated offline (in-sandbox):** `cfn-lint template.yaml` reports **zero
+- **Validated offline:** `cfn-lint infrastructure/template.yaml` reports **zero
   errors** (and zero warnings), and the inline Lambda Python stubs compile
   cleanly (`python3 -m py_compile`).
-- **Requires live AWS credentials (not run here):**
-  `aws cloudformation deploy`, `aws stepfunctions start-execution`,
-  `aws cloudformation describe-stacks`, and `aws cloudformation delete-stack`.
-  These are documented above and should be run against a real account.
-  `aws cloudformation validate-template` also calls the AWS API and therefore
-  needs credentials.
+- **Requires live AWS credentials:** `aws cloudformation deploy`,
+  `aws stepfunctions start-execution`, `aws cloudformation describe-stacks`, and
+  `aws cloudformation delete-stack`. These are documented above and should be run
+  against a real account. `aws cloudformation validate-template` also calls the
+  AWS API and therefore needs credentials.
 
 ## Acknowledged shortcuts (demo) vs. production
 

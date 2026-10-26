@@ -7,13 +7,15 @@
 #
 #   pip3 install --user cfn-lint      # or into a virtualenv
 #
-# Usage:
-#   ./scripts/validate.sh
+# Usage (from anywhere):
+#   ./infrastructure/scripts/validate.sh
 #
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TEMPLATE="${ROOT_DIR}/template.yaml"
+# Directory that holds template.yaml: the parent of this script's directory
+# (infrastructure/scripts/validate.sh -> infrastructure/).
+INFRA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TEMPLATE="${INFRA_DIR}/template.yaml"
 
 if ! command -v cfn-lint >/dev/null 2>&1; then
   echo "cfn-lint not found on PATH. Install it with: pip3 install --user cfn-lint" >&2
