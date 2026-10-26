@@ -1,0 +1,5 @@
+# Development dependencies for contributors who prefer plain pip.
+# The canonical source of truth is the [dev] extra in pyproject.toml:
+#   pip install -e '.[dev]'
+# This file mirrors that extra for convenience.
+pytest>=7.0
