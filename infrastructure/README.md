@@ -163,6 +163,40 @@ cfn-lint infrastructure/template.yaml     # expect zero errors
 ./infrastructure/scripts/validate.sh
 ```
 
+### Validate the deployed stack end to end (live AWS)
+
+Once the stack is deployed, `validate-live.sh` checks the **real** infrastructure
+end to end. Unlike `cfn-lint` (offline), this script calls the AWS API, so it
+**requires live AWS credentials**. Run it with your own environment:
+
+```bash
+AWS_PROFILE=<profile> ./infrastructure/scripts/validate-live.sh
+```
+
+It reads the stack name from the optional `STACK_NAME` environment variable
+(default `vcon-livekit-demo`) and takes the region from your AWS
+config/profile (and the stack's `Region` output):
+
+```bash
+STACK_NAME=my-stack AWS_PROFILE=<profile> ./infrastructure/scripts/validate-live.sh
+```
+
+Each check prints a labelled `PASS`/`FAIL` line; the script reports a final
+summary and exits non-zero if any check failed. It verifies:
+
+- the stack status is `CREATE_COMPLETE` or `UPDATE_COMPLETE`;
+- the S3 bucket has versioning `Enabled`;
+- the S3 default encryption algorithm is `AES256` (SSE-S3);
+- the bucket's public access block has all four flags `true`;
+- the three pipeline Lambda functions (`*-transcribe-step`,
+  `*-comprehend-step`, `*-enrich-step`) exist;
+- the Step Functions state machine status is `ACTIVE`;
+- an **end-to-end execution**: it starts the state machine with the canned
+  skeleton vCon input, polls until the execution finishes, asserts the final
+  status is `SUCCEEDED`, and confirms the output preserves the top-level
+  `"vcon": "0.0.1"` version and carries the three analysis entries in order
+  (`transcript`, `phi-detection`, `summary`).
+
 ### What can be validated offline vs. what needs live AWS
 
 - **Validated offline:** `cfn-lint infrastructure/template.yaml` reports **zero
