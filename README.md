@@ -94,6 +94,29 @@ The `.env` file configures the LiveKit connection
 AWS backend (`BUCKET_NAME`, `STATE_MACHINE_ARN`, `AWS_REGION`). The AWS variables
 are optional; leave them blank to use the local-file fallback.
 
+#### Development environment (Nix + direnv)
+
+The recommended way to get a working dev environment is the committed Nix flake,
+which pins a Python with reliable prebuilt wheels for the LiveKit/numpy native
+stack and provides the native system libraries those wheels need (notably
+`libstdc++`), so you avoid the manual virtualenv and system-library setup.
+
+With [Nix](https://nixos.org/download) (flakes enabled) and
+[direnv](https://direnv.net/) installed, run `direnv allow` once in the repo
+root. From then on, `cd`-ing into the project drops you into a shell that:
+
+- exports the native libraries onto `LD_LIBRARY_PATH` so the pip-installed
+  wheels load their C-extensions,
+- **creates** a `.venv` and installs the project (`pip install -e '.[dev]'`) on
+  first entry if one doesn't exist, and **activates** the existing `.venv`
+  otherwise.
+
+So `python -m vcon_agent.agent console` and `pytest` work immediately. Without
+direnv, run `nix develop` for the same shell. The first entry also generates
+`flake.lock` if it isn't present yet.
+
+The manual setup above remains the non-Nix fallback.
+
 ### Run the agent (live)
 
 The live voice path needs **real credentials** for LiveKit, Deepgram,
