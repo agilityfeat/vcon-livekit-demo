@@ -365,3 +365,89 @@ inline Lambda body. The live end-to-end check is
   runnable while the failure stays visible). → *Production:* a `Catch` to a
   visible alarm state plus retries, so operators are paged rather than reading a
   silently empty result.
+
+## Sign, encrypt & redact (Spec 4)
+
+Spec 4 turns the **enriched** vCon from Spec 3 into the signed / sealed record
+and produces a **redacted sibling** linked back to the full version through the
+vCon `redacted` chain. The correctness-critical logic lives in the pure,
+offline-tested core `src/vcon_agent/sealing.py`, and is mirrored into an inline
+Seal Lambda wired after the pipeline's merge step.
+
+### What the seal step does
+
+1. **Sign the completed vCon (JWS).** The enriched vCon is serialized to
+   canonical JSON and signed with a demo RSA keypair (`PS256`), producing a JWS.
+   The signed document is the **authoritative, integrity-protected** record;
+   `verify_vcon` recovers the exact payload and fails loudly on a tampered
+   payload or wrong key.
+2. **Encrypt the full copy (JWE).** The full vCon (or its JWS) is encrypted with
+   `RSA-OAEP-256` key wrap + `A256GCM` content encryption, so the complete,
+   un-redacted record is stored **encrypted at rest** and only a holder of the
+   private key can read it.
+3. **Produce the redacted sibling.** A copy of the vCon is created with PII
+   stripped from the `dialog` turn bodies and the `analysis` bodies (free-text
+   transcripts / summaries and the `entities` entity `text`), **keeping the
+   document structure intact** — the same top-level keys, the same
+   `parties` / `dialog` / `analysis` / `attachments` shape and ordering, and the
+   same party indices. Redacted spans are replaced with a stable `[REDACTED]`
+   placeholder rather than dropped, so a consumer can see where redaction
+   happened.
+4. **Link via the vCon `redacted` pointer.** The redacted copy carries a
+   top-level `redacted` reference back to the **full signed version**, identified
+   by the full vCon `uuid` plus a content `type` (`application/vcon+jws`),
+   matching the repo's by-`uuid` / by-index convention (never embedded
+   identities). Only the redacted copy carries this pointer; the full copy never
+   does.
+
+### Why this runs in the pipeline, not the agent
+
+Signing, encryption, and redaction all happen in the **enrichment pipeline**
+after the merge step, never in the agent process. This keeps the team's "no AWS
+in the agent process" design note intact: the agent's only AWS touchpoint stays
+the single S3 PUT of the skeleton vCon. The redaction step's AWS Comprehend
+Medical `DetectPHI` pass is likewise confined to the inline Lambda; the pure core
+in `sealing.py` never calls AWS and instead accepts an injected `detect_phi`
+callable (or pre-computed `phi_spans`), so it stays fully offline-testable with
+canned spans.
+
+### Library choice: jwcrypto
+
+The seal uses [`jwcrypto`](https://jwcrypto.readthedocs.io/), a pure-Python
+JWS / JWE / JWK library on top of `cryptography`. The vCon spec models a signed
+vCon as a JWS and an encrypted vCon as a JWE over the JSON document, and the vCon
+reference Python library (`python-vcon`) itself uses `jwcrypto` for its
+signing / encryption. Taking `python-vcon` as a direct dependency would pull a
+large, heavier tree that is less reliably installable across
+`requires-python >=3.9`; `jwcrypto` gives the exact JOSE primitives needed to
+implement the vCon JWS / JWE / redacted structure directly while keeping the
+dependency surface small and offline-testable. It is declared as a main
+dependency because the pure core imports it at runtime.
+
+### Offline verification
+
+The seal is verified the same way as the rest of the repo: the sign/verify,
+encrypt/decrypt, and redaction logic are pure functions in `sealing.py`,
+unit-tested in `tests/test_sealing.py` with a demo keypair generated in-memory,
+canned PHI spans, and no live AWS or network. The crypto-dependent tests are
+guarded with `pytest.importorskip('jwcrypto')` so they SKIP cleanly (rather than
+failing collection) if the JOSE library could not be installed.
+
+### Acknowledged shortcuts (demo) vs. production
+
+- 🩹 **Self-signed demo keypair** generated / loaded locally (env / local), not a
+  managed key. → *Production:* AWS KMS / ACM PCA, key rotation, HSM-backed
+  signing; never ship keys with the app. (Ties to the AWS-plugin
+  long-term-credential caveat — #1719.)
+- 🩹 **Redaction = naive PII removal** (regex over known fields such as emails,
+  phone numbers, and SSN-like digit runs, plus an optional Comprehend Medical
+  `DetectPHI` pass over known fields). → *Production:* vetted de-identification
+  against the full PHI surface, reviewed for the applicable safe-harbor /
+  expert-determination standard.
+- 🩹 **JWE encryption with a demo key, stored in the same bucket** as the rest of
+  the vCon artifacts. → *Production:* SSE-KMS, separate access scopes for full
+  vs. redacted, least privilege.
+
+### Compliance
+
+this PoC demonstrates the mechanisms vCon provides for consent, integrity, and redaction. It is not a HIPAA-certified deployment and must not be used with real PHI.

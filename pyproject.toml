@@ -15,6 +15,11 @@ dependencies = [
     "livekit-plugins-openai>=1.0",
     "boto3>=1.34",
     "python-dotenv>=1.0",
+    # Spec 4: JWS/JWE/JWK primitives for signing, encrypting, and the redacted
+    # vCon. jwcrypto is a pure-Python JOSE library on top of `cryptography`; the
+    # pure sealing core (src/vcon_agent/sealing.py) imports it at runtime, so it
+    # is a main dependency. Installable on requires-python >=3.9.
+    "jwcrypto>=1.5",
 ]
 
 [project.optional-dependencies]
