@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<!--
+  vCon viewer (Spec 5) — a minimal, static, single-page viewer.
+
+  No framework, no build step, no backend, no CDN: everything it needs is in
+  this directory so it runs fully offline. Open it directly (file://) or, to
+  exercise the bundled-sample fetch path, serve the repo root over http:
+
+      python3 -m http.server
+      # then open localhost:8000/viewer/index.html in a browser
+
+  🩹 Demo shortcut: single-page local viewer, no auth, reads a vCon from a
+  bundled sample / local file / URL. → Production: an access-controlled app
+  where the full-record vs. redacted view is gated by the viewer's role.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>vCon Viewer</title>
+  <link rel="stylesheet" href="viewer.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>vCon Viewer</h1>
+    <p class="tagline">One record &middot; provenance click-through &middot; linked full / redacted views</p>
+  </header>
+
+  <section class="controls" aria-label="Load a vCon">
+    <div class="load-row">
+      <button id="load-sample-btn" type="button">Load bundled sample</button>
+
+      <label class="file-pick">
+        Load local file
+        <input id="file-input" type="file" accept=".json,application/json" />
+      </label>
+
+      <span class="url-load">
+        <input id="url-input" type="text" placeholder="URL or relative path to a vCon JSON" />
+        <button id="load-url-btn" type="button">Load URL</button>
+      </span>
+    </div>
+
+    <div class="view-toggle" role="group" aria-label="View as">
+      <span class="toggle-label">View as:</span>
+      <button id="view-physician-btn" type="button" class="active" aria-pressed="true">Physician (full)</button>
+      <button id="view-analyst-btn" type="button" aria-pressed="false">Analyst (redacted)</button>
+    </div>
+
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+
+    <details class="help">
+      <summary>How to use this viewer</summary>
+      <ul>
+        <li><strong>Bundled sample</strong> &mdash; loads <code>samples/vcon-full.sample.json</code>. Needs the page to be served over http (e.g. <code>python3 -m http.server</code>); under <code>file://</code> the browser may block the fetch, so use the file picker instead.</li>
+        <li><strong>Local file</strong> &mdash; pick any vCon JSON from disk; it is read in the browser (no upload).</li>
+        <li><strong>URL</strong> &mdash; paste a URL or relative path to a vCon JSON and load it.</li>
+        <li><strong>Physician / Analyst toggle</strong> &mdash; Physician shows the full record (transcript, summary, clickable medications that seek the audio). Analyst shows the redacted record, visibly linked to the full one via the standard <code>redacted</code> field.</li>
+      </ul>
+      <p class="note">🩹 Demo: no auth; role views are a client-side toggle. → Production: role-gated access control.</p>
+    </details>
+  </section>
+
+  <main id="viewer" hidden>
+    <!-- Same-vCon link banner (shown in analyst view). -->
+    <section id="link-banner" class="link-banner" hidden></section>
+
+    <section class="panel" id="meta-panel">
+      <h2>Record</h2>
+      <dl id="meta" class="meta-grid"></dl>
+    </section>
+
+    <section class="panel" id="audio-panel">
+      <h2>Call audio</h2>
+      <audio id="audio" controls preload="none"></audio>
+      <p id="audio-note" class="note"></p>
+    </section>
+
+    <section class="panel" id="parties-panel">
+      <h2>Parties</h2>
+      <ol id="parties" class="parties"></ol>
+    </section>
+
+    <section class="panel" id="meds-panel">
+      <h2>Extracted medications &amp; conditions</h2>
+      <p class="note">Click a medication to jump the audio to the moment it was mentioned (provenance).</p>
+      <div id="meds" class="chips"></div>
+    </section>
+
+    <section class="panel" id="summary-panel">
+      <h2>Summary</h2>
+      <p id="summary" class="body-text"></p>
+      <p id="summary-prov" class="provenance"></p>
+    </section>
+
+    <section class="panel" id="transcript-panel">
+      <h2>Transcript (speaker-attributed)</h2>
+      <ol id="dialog" class="dialog"></ol>
+    </section>
+
+    <section class="panel" id="analysis-panel">
+      <h2>Analysis</h2>
+      <div id="analysis"></div>
+    </section>
+  </main>
+
+  <script src="viewer.js"></script>
+</body>
+</html>

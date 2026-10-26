@@ -7,6 +7,9 @@
 packaged.yaml
 *.packaged.yaml
 
+# Local vcon-library install target (Spec 5 portability CLI / tests)
+.vconlib/
+
 # Python artifacts
 __pycache__/
 *.py[cod]

@@ -1,0 +1,105 @@
+{
+  "vcon": "0.0.1",
+  "uuid": "11111111-1111-4111-8111-111111111111",
+  "subject": "Patient intake call",
+  "created_at": "2024-01-01T15:04:05+00:00",
+  "parties": [
+    {
+      "name": "Dana Rivera",
+      "role": "patient"
+    },
+    {
+      "name": "Intake Agent",
+      "role": "agent"
+    }
+  ],
+  "dialog": [
+    {
+      "type": "text",
+      "party": 1,
+      "body": "Hi, thanks for calling. What brings you in today?",
+      "start": 0.0,
+      "duration": 4.0,
+      "mimetype": "text/plain"
+    },
+    {
+      "type": "text",
+      "party": 0,
+      "body": "I've had a bad headache for about two days, and I've been taking ibuprofen for it.",
+      "start": 4.0,
+      "duration": 6.5,
+      "mimetype": "text/plain"
+    },
+    {
+      "type": "text",
+      "party": 1,
+      "body": "How much ibuprofen have you been taking, and how often?",
+      "start": 10.5,
+      "duration": 3.5,
+      "mimetype": "text/plain"
+    },
+    {
+      "type": "text",
+      "party": 0,
+      "body": "About 200 milligrams every six hours since the headache started.",
+      "start": 14.0,
+      "duration": 5.0,
+      "mimetype": "text/plain"
+    },
+    {
+      "type": "recording",
+      "url": "recording.sample.ogg",
+      "start": 0.0,
+      "duration": 19.0,
+      "mimetype": "audio/ogg"
+    }
+  ],
+  "analysis": [
+    {
+      "type": "transcript",
+      "vendor": "aws-transcribe-medical",
+      "authoritative": true,
+      "dialog": [0, 1, 2, 3],
+      "body": "Agent: Hi, thanks for calling. What brings you in today? Patient: I've had a bad headache for about two days, and I've been taking ibuprofen for it. Agent: How much ibuprofen have you been taking, and how often? Patient: About 200 milligrams every six hours since the headache started.",
+      "mimetype": "text/plain"
+    },
+    {
+      "type": "entities",
+      "vendor": "aws-comprehend-medical",
+      "dialog": [1],
+      "body": [
+        {
+          "category": "MEDICAL_CONDITION",
+          "text": "headache",
+          "score": 0.99
+        },
+        {
+          "category": "MEDICATION",
+          "text": "ibuprofen",
+          "score": 0.98
+        }
+      ]
+    },
+    {
+      "type": "summary",
+      "vendor": "aws-bedrock",
+      "dialog": [0, 1, 2, 3],
+      "body": "Patient reports a headache lasting about two days and has been self-treating with ibuprofen 200 mg every six hours.",
+      "mimetype": "text/plain"
+    }
+  ],
+  "attachments": [
+    {
+      "type": "consent",
+      "party": 0,
+      "granted": true,
+      "script": "This call will be recorded and transcribed to assist with your intake. Do you consent to recording and processing of this conversation?",
+      "timestamp": "2024-01-01T15:04:05+00:00"
+    }
+  ],
+  "redacted": {
+    "uuid": "22222222-2222-4222-8222-222222222222",
+    "type": "redacted",
+    "url": "vcon-redacted.sample.json"
+  }
+}

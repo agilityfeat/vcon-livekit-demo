@@ -325,3 +325,18 @@ inline Lambda body. The live end-to-end check is
   runnable while the failure stays visible). → *Production:* a `Catch` to a
   visible alarm state plus retries, so operators are paged rather than reading a
   silently empty result.
+
+## Viewer + portability (Spec 5)
+
+Spec 5 is the payoff: it makes the benefits of the single vCon **visible**. A
+minimal static web viewer renders parties / dialog / analysis and lets a
+physician click an extracted medication to jump the audio to the exact moment it
+was mentioned (turn-index provenance); an analyst view shows the de-identified
+record and proves it is the same vCon via the standard `redacted` link. A tiny
+portability CLI (the "second tool") then loads the same record with the
+independent `vcon` PyPI library to show it is standard and portable.
+
+For how to open the viewer (serve the repo over `python3 -m http.server`), the
+provenance click-through, the redacted ↔ full link, and how to install the vcon
+library locally and run the portability CLI against the bundled sample, see
+**[viewer/README.md](viewer/README.md)**.
