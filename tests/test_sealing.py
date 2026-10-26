@@ -1,4 +1,4 @@
-"""Unit tests for the pure Spec 4 sign / encrypt / redact core.
+"""Unit tests for the pure sign / encrypt / redact core.
 
 Fully offline: the demo keypair is generated in-memory, redaction PHI spans are
 canned, and there is no boto3 / network / live Comprehend Medical. These tests
@@ -16,7 +16,7 @@ import pytest
 
 # Skip the whole module (with an explanatory reason) if jwcrypto could not be
 # installed, instead of failing collection.
-pytest.importorskip("jwcrypto", reason="jwcrypto not installed; Spec 4 crypto tests skipped")
+pytest.importorskip("jwcrypto", reason="jwcrypto not installed; crypto tests skipped")
 
 from vcon_agent.sealing import (  # noqa: E402  (import after importorskip)
     REDACTED_POINTER_TYPE,

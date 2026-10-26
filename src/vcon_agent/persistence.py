@@ -12,12 +12,15 @@ Behavior on flush (:func:`persist_vcon`):
   ``ContentType=application/json``. Then, if ``STATE_MACHINE_ARN`` is also set,
   trigger enrichment via Step Functions ``start_execution`` with input
   ``json.dumps({"vcon": <doc>})`` -- the exact envelope the enrichment state machine
-  unwraps with ``event.get("vcon", event)``.
+  unwraps with ``event.get("vcon", event)`` -- and a deterministic ``name``
+  (see :func:`~vcon_agent.vcon.execution_name`) derived from the idempotency key
+  ``room_name + session start`` so a retried start is a no-op, not a duplicate
+  run.
 * If ``BUCKET_NAME`` is NOT set, write the vCon JSON to a local file under a
   ``vcon-output/`` directory using the same run-key path layout, and skip
   StartExecution entirely (no AWS client is created or called).
 
-Under the acknowledged "one flush PUT on session end" shortcut there is no
+Under the "one flush PUT on session end" shortcut there is no
 retry or per-turn history, so the end-of-session write is the one and only
 chance to persist the whole call. To keep that one-shot model fail-safe rather
 than fail-open, :func:`persist_vcon` makes a last-resort local write under

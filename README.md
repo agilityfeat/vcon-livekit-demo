@@ -143,7 +143,7 @@ fakes, so the suite runs with **no network and no credentials**:
 python3 -m pytest tests/ -q
 ```
 
-### Acknowledged shortcuts (demo) vs. production
+### Shortcuts (demo) vs. production
 
 - 🩹 **Hardcoded consent script + boolean**, captured up front. → *Production:*
   versioned consent text bound to an authenticated identity, with the
@@ -244,17 +244,18 @@ env-optional behavior of the persistence layer. `AWS_ACCESS_KEY_ID` /
 `AWS_SECRET_ACCESS_KEY` are used for the S3 upload credentials if present and
 otherwise fall back to the instance role.
 
-The **live egress path is not part of automated
+Like the live voice path, the **live egress path is not part of automated
 verification**: it needs real LiveKit and AWS credentials and cannot be
 exercised offline. The egress call sits behind an injectable/mockable seam, so
 the recording-key helper, the recording dialog object, and the egress-request
 builder are all unit-tested offline with fakes (no live LiveKit/AWS).
 
-### Acknowledged shortcuts (demo) vs. production
+### Shortcuts (demo) vs. production
 
 - 🩹 **Plain SSE-S3, no customer-managed KMS key** for the recordings. →
-  *Production:* SSE-KMS with a CMK, bucket policy, and VPC endpoints.
-- 🩹 **Poll-based readiness** (polls S3 at the recording key with a simple
+  *Production:* SSE-KMS with a CMK, bucket policy, and VPC endpoints. (JWE is
+  still demonstrated on the vCon itself.)
+- 🩹 **Poll-based readiness** (the enrichment pipeline polls S3 at the recording key with a simple
   timeout/retry). → *Production:* event-driven readiness with proper dedupe on
   `egressId`, reconciliation for missing events, and handling of early/truncated
   egress.
@@ -331,7 +332,7 @@ and the template is checked with `cfn-lint` plus `python3 -m py_compile` on each
 inline Lambda body. The live end-to-end check is
 `infrastructure/scripts/validate-live.sh` (requires real AWS credentials).
 
-### Acknowledged shortcuts (demo) vs. production
+### Shortcuts (demo) vs. production
 
 - 🩹 **Deterministic idempotency key = `room_name + session start`**, hashed into
   the execution name. → *Production:* a stable server-assigned call/session id
@@ -366,9 +367,9 @@ inline Lambda body. The live end-to-end check is
   visible alarm state plus retries, so operators are paged rather than reading a
   silently empty result.
 
-## Sign, encrypt & redact (Spec 4)
+## Sign, encrypt & redact
 
-Spec 4 turns the **enriched** vCon from Spec 3 into the signed / sealed record
+The seal step turns the **enriched** vCon into the signed / sealed record
 and produces a **redacted sibling** linked back to the full version through the
 vCon `redacted` chain. The correctness-critical logic lives in the pure,
 offline-tested core `src/vcon_agent/sealing.py`, and is mirrored into an inline
@@ -433,7 +434,7 @@ canned PHI spans, and no live AWS or network. The crypto-dependent tests are
 guarded with `pytest.importorskip('jwcrypto')` so they SKIP cleanly (rather than
 failing collection) if the JOSE library could not be installed.
 
-### Acknowledged shortcuts (demo) vs. production
+### Shortcuts (demo) vs. production
 
 - 🩹 **Self-signed demo keypair** generated / loaded locally (env / local), not a
   managed key. → *Production:* AWS KMS / ACM PCA, key rotation, HSM-backed

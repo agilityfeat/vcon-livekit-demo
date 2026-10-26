@@ -1,15 +1,15 @@
-"""Pure, boto3-free signing / encryption / redaction core for the Spec 4 seal.
+"""Pure, boto3-free signing / encryption / redaction core for the seal step.
 
 This module is the AUTHORITATIVE, unit-tested copy of the correctness-critical
-Spec 4 logic: turning the completed, enriched vCon from Spec 3 into a signed
+seal logic: turning the completed, enriched vCon into a signed
 (JWS) and encrypted (JWE) record, and producing a redacted sibling that strips
 PII from the dialog / analysis bodies while preserving the document structure and
 pointing back at the full signed version via the vCon ``redacted`` reference.
 
 Why a separate pure module? The real pipeline runs this logic as an inline-code
 Lambda inside the CloudFormation template (``Code.ZipFile``), which CANNOT import
-this repo package at AWS runtime. FEAT-002 therefore MIRRORS this logic into that
-inline Seal Lambda body. Keeping the logic here as pure functions means it is
+this repo package at AWS runtime. The inline Seal Lambda body therefore MIRRORS
+this logic. Keeping the logic here as pure functions means it is
 exercised by the offline pytest suite (demo keypair generated in-memory, canned
 PHI spans, no live AWS and no live Comprehend Medical), and the inline copy stays
 small and checkable with ``py_compile``. This mirror/pure-core split matches the

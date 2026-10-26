@@ -87,7 +87,7 @@ Resources:
   # BucketName is derived with !Sub from ProjectName + Environment + AccountId +
   # Region so it is globally unique and does not collide across accounts/regions.
   #
-  # Shortcut (acknowledged): SSE-S3 (AES256) default encryption, not a
+  # Shortcut: SSE-S3 (AES256) default encryption, not a
   # customer-managed KMS key. Production would use SSE-KMS with a CMK, a key
   # policy, and separate access scopes for full vs. redacted vCons.
   #
@@ -119,7 +119,7 @@ Resources:
   # ---------------------------------------------------------------------------
   # Lambda execution role (trusts lambda.amazonaws.com).
   #
-  # Shortcut (acknowledged): BROAD-ISH, SERVICE-LEVEL IAM for demo readability -
+  # Shortcut: BROAD-ISH, SERVICE-LEVEL IAM for demo readability -
   # a single shared role, service-level actions, and a single bucket scope.
   # Production would use least-privilege per action/resource, condition keys, and
   # a separate role per Lambda.
@@ -217,7 +217,7 @@ Resources:
   # input {"vcon": <doc>}; each later step receives the previous step's output
   # envelope {"vcon": <doc>, ...}. One unwrap always yields the vCon document.
   #
-  # Shortcut (acknowledged): inline code via Code.ZipFile instead of versioned
+  # Shortcut: inline code via Code.ZipFile instead of versioned
   # artifacts in S3/ECR built by a CI/CD pipeline.
   # ---------------------------------------------------------------------------
 
@@ -971,7 +971,7 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
-  # Seal step (Spec 4): turn the completed, enriched vCon into the signed/sealed
+  # Seal step: turn the completed, enriched vCon into the signed/sealed
   # record and its redacted sibling. Runs AFTER Merge. This inline body MIRRORS
   # the pure, offline-tested logic in src/vcon_agent/sealing.py (the authoritative
   # copy) - sign (JWS), encrypt the full signed copy (JWE), and build the redacted

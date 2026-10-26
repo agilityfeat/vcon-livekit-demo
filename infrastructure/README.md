@@ -6,7 +6,7 @@ with one command, exposes the identifiers the local app needs as stack
 **Outputs**, and tears down cleanly.
 
 Everything lives in one template, Lambda code is inlined, and IAM is kept broad
-for readability. The acknowledged shortcuts and their production counterparts
+for readability. The shortcuts and their production counterparts
 are listed at the end.
 
 **Why Step Functions over a single Lambda.** Transcribe Medical batch is an
@@ -342,7 +342,7 @@ summary and exits non-zero if any check failed. It verifies:
   against a real account. `aws cloudformation validate-template` also calls the
   AWS API and therefore needs credentials.
 
-## Acknowledged shortcuts (demo) vs. production
+## Shortcuts (demo) vs. production
 
 - 🩹 **Broad-ish IAM** (service-level actions, a single shared Lambda role,
   single bucket) for readability. → *Production:* least-privilege per

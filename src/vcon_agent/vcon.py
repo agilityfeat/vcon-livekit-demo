@@ -58,7 +58,7 @@ _EXECUTION_NAME_DISALLOWED = re.compile(r"[^A-Za-z0-9_-]+")
 # (64 bits) is ample collision resistance for one clinic's call volume.
 _EXECUTION_NAME_HASH_LEN = 16
 
-# Hardcoded consent script (acknowledged shortcut). Production would use a
+# Hardcoded consent script (demo shortcut). Production would use a
 # versioned consent text, bind it to an authenticated identity, and scope it to
 # the applicable jurisdiction rather than shipping a single literal string here.
 DEFAULT_CONSENT_SCRIPT = (
@@ -310,7 +310,7 @@ class VConBuilder:
         patient/agent speech, so it does NOT reference a single party index; it
         represents the whole call.
 
-        SHORTCUT (acknowledged): audio only (no video); plain SSE-S3 (no CMK);
+        SHORTCUT: audio only (no video); plain SSE-S3 (no CMK);
         readiness is handled by polling S3 at the recording key, not
         event-driven here. Production would support configurable video egress,
         SSE-KMS with a CMK, and event-driven readiness with proper dedupe on the
