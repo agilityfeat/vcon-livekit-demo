@@ -55,7 +55,7 @@ The stubbed pipeline runs end to end without this, but a real
 aws cloudformation deploy \
   --template-file infrastructure/template.yaml \
   --stack-name vcon-livekit-demo \
-  --capabilities CAPABILITY_IAM
+  --capabilities CAPABILITY_NAMED_IAM
 ```
 
 Optional parameter overrides:
@@ -64,7 +64,7 @@ Optional parameter overrides:
 aws cloudformation deploy \
   --template-file infrastructure/template.yaml \
   --stack-name vcon-livekit-demo \
-  --capabilities CAPABILITY_IAM \
+  --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides ProjectName=vcon-livekit-demo Environment=dev
 ```
 
