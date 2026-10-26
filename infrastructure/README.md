@@ -9,6 +9,15 @@ Everything lives in one template, Lambda code is inlined, and IAM is kept broad
 for readability. The acknowledged shortcuts and their production counterparts
 are listed at the end.
 
+**Why Step Functions over a single Lambda.** Transcribe Medical batch is an
+asynchronous job that can run longer than Lambda's hard 15-minute timeout. If a
+single Lambda tried to start the job and then sleep until it finished, it would
+time out. Instead the state machine OWNS the waiting: a `Wait` state plus a
+`GetMedicalTranscriptionJob` poll plus a `Choice` loop keep checking until the
+job reaches `COMPLETED` or `FAILED`, and the retry/catch lives in the state
+machine too. Each Lambda does one short unit of work and returns, so no Lambda
+ever sleeps past its timeout.
+
 > All commands below are written to be run from the **repository root** (the
 > parent of this `infrastructure/` folder), which is why paths are prefixed
 > with `infrastructure/`.
@@ -18,9 +27,9 @@ are listed at the end.
 | Resource | Purpose |
 |---|---|
 | **S3 bucket** (`AWS::S3::Bucket`) | Recordings from LiveKit Egress + skeleton / enriched / redacted vCon JSON. Versioning on, SSE-S3 default encryption, all public access blocked. |
-| **Lambda functions** (`AWS::Lambda::Function`) | The pipeline steps invoked by the state machine. Inline Python stubs (`transcribe-step`, `comprehend-step`, `enrich-step`). |
-| **Step Functions state machine** (`AWS::StepFunctions::StateMachine`) | The enrichment orchestrator. Runs the Lambdas in sequence; invoked by the local app via `StartExecution`. |
-| **IAM roles** (`AWS::IAM::Role`) | A Step Functions execution role and a Lambda execution role granting access to Transcribe Medical, Comprehend Medical, Bedrock, S3, and CloudWatch Logs. |
+| **Lambda functions** (`AWS::Lambda::Function`) | The seven real pipeline steps invoked by the state machine, inline Python: `poll-recording-step` (poll S3 for the recording), `load-skeleton-step` (load the skeleton vCon), `start-transcription-step` (start the Transcribe Medical batch job), `get-transcription-step` (poll the job once), `comprehend-step` (Comprehend Medical meds + conditions), `bedrock-step` (physician summary), and `merge-step` (merge results into `analysis[]` with turn-index provenance). Each body mirrors the pure, offline-tested logic in `src/vcon_agent/enrichment.py` + `vcon.py` (inline code cannot import the repo package at AWS runtime). |
+| **Step Functions state machine** (`AWS::StepFunctions::StateMachine`) | The enrichment orchestrator. Polls S3 for the recording, runs Transcribe Medical as an async batch whose completion the state machine awaits, then runs Comprehend Medical and Bedrock as a parallel branch, then merges into `analysis[]`. Invoked by the local app via a deterministic, idempotent `StartExecution`. |
+| **IAM roles** (`AWS::IAM::Role`) | A Step Functions execution role (invokes all seven pipeline Lambdas + writes execution logs) and a Lambda execution role granting access to Transcribe Medical, Comprehend Medical, Bedrock, S3, and CloudWatch Logs. |
 
 ### Explicitly NOT created (and why)
 
@@ -46,8 +55,9 @@ it once per account/region before the `enrich` step can call Bedrock:
    Anthropic Claude or Amazon Titan text model).
 4. Wait until the status shows **Access granted**.
 
-The stubbed pipeline runs end to end without this, but a real
-`bedrock:InvokeModel` call will fail until the model is enabled.
+The pipeline still runs end to end without this (the `bedrock-step` falls back to
+an empty summary if the model is unavailable), but a real `bedrock:InvokeModel`
+call only returns a summary once the model is enabled.
 
 ## Deploy (one command)
 
@@ -109,11 +119,48 @@ timestamp:
 Bucket **versioning** is enabled as cheap insurance in case a key is ever
 reused.
 
-## Run the pipeline (trivial `StartExecution`)
+## Run the pipeline (`StartExecution`)
+
+In the demo the **local agent** starts the pipeline directly on session end: it
+PUTs the skeleton vCon to S3 and calls Step Functions `StartExecution` with input
+`{"vcon": <doc>}` and a **deterministic execution name** derived from the
+idempotency key `room_name + session start` (see
+`src/vcon_agent/vcon.py::execution_name`). Because the name is deterministic and
+Step Functions rejects a duplicate name, a retried start is a **no-op** rather
+than a second pipeline run. There is no EventBridge or webhook on the critical
+path.
+
+### The states
+
+```
+WaitForRecording   poll S3 (HeadObject) for the recording object
+  -> IsRecordingReady (Choice): not ready -> Wait 5s -> WaitForRecording
+LoadSkeleton       load the skeleton vCon for this run
+StartTranscription start the Transcribe Medical BATCH job (async), return job name
+  -> WaitForTranscription (Wait 5s)
+  -> GetTranscription (poll the job once)
+  -> IsTranscriptionComplete (Choice):
+       COMPLETED -> Analyze
+       FAILED    -> TranscriptionFailed (Fail)
+       otherwise -> WaitForTranscription   (the state machine owns the wait)
+Analyze            Parallel: Comprehend Medical (meds + conditions) | Bedrock summary
+Merge              write analysis[] entries with dialog turn-index provenance
+Done               Succeed
+```
+
+The clinical **Transcribe Medical** transcript is added to `analysis[]` marked
+`authoritative` and sits **alongside** the live Deepgram transcript already in
+`dialog[]`. This dual-transcript shape is deliberate: the real-time agent STT is
+tuned for latency, Transcribe Medical for clinical accuracy, and vCon holds both
+with provenance rather than forcing you to reconcile two vendor records by hand.
+
+### Start it by hand
 
 Grab the state machine ARN from the Outputs (or your `.env`), then start an
-execution with a canned skeleton vCon as input. The stubbed steps pass the vCon
-through and the execution reaches the `Succeed` state end to end.
+execution with a canned skeleton vCon as input. With no real recording in the
+input, the poll step reports ready immediately and `start-transcription-step`
+takes the **canned-transcript stub** path, so the execution still reaches `Merge`
+and writes the real analysis types.
 
 ```bash
 aws stepfunctions start-execution \
@@ -130,7 +177,8 @@ aws stepfunctions start-execution \
   }'
 ```
 
-Check the result:
+Check the result (the final output carries `"vcon": "0.0.1"` and `analysis[]`
+with types `transcript`, `entities`, `summary` in that order):
 
 ```bash
 aws stepfunctions describe-execution --execution-arn "<execution-arn-from-above>"
@@ -188,20 +236,26 @@ summary and exits non-zero if any check failed. It verifies:
 - the S3 bucket has versioning `Enabled`;
 - the S3 default encryption algorithm is `AES256` (SSE-S3);
 - the bucket's public access block has all four flags `true`;
-- the three pipeline Lambda functions (`*-transcribe-step`,
-  `*-comprehend-step`, `*-enrich-step`) exist;
+- the seven pipeline Lambda functions exist (`*-poll-recording-step`,
+  `*-load-skeleton-step`, `*-start-transcription-step`,
+  `*-get-transcription-step`, `*-comprehend-step`, `*-bedrock-step`,
+  `*-merge-step`);
 - the Step Functions state machine status is `ACTIVE`;
 - an **end-to-end execution**: it starts the state machine with the canned
   skeleton vCon input, polls until the execution finishes, asserts the final
   status is `SUCCEEDED`, and confirms the output preserves the top-level
   `"vcon": "0.0.1"` version and carries the three analysis entries in order
-  (`transcript`, `phi-detection`, `summary`).
+  (`transcript`, `entities`, `summary`) with the clinical transcript marked
+  `authoritative`. Note the canned input has **no real recording**, so the
+  pipeline exercises the canned-transcript stub path on the live stack too.
 
 ### What can be validated offline vs. what needs live AWS
 
 - **Validated offline:** `cfn-lint infrastructure/template.yaml` reports **zero
-  errors** (and zero warnings), and the inline Lambda Python stubs compile
-  cleanly (`python3 -m py_compile`).
+  errors** (and zero warnings), each inline Lambda body compiles cleanly
+  (`python3 -m py_compile`), and the correctness-critical logic the inline
+  bodies mirror (`src/vcon_agent/enrichment.py` + `vcon.py`) is exercised by the
+  offline pytest suite (`python3 -m pytest tests/ -q`).
 - **Requires live AWS credentials:** `aws cloudformation deploy`,
   `aws stepfunctions start-execution`, `aws cloudformation describe-stacks`, and
   `aws cloudformation delete-stack`. These are documented above and should be run
@@ -213,8 +267,26 @@ summary and exits non-zero if any check failed. It verifies:
 - 🩹 **Broad-ish IAM** (service-level actions, a single shared Lambda role,
   single bucket) for readability. → *Production:* least-privilege per
   action/resource, condition keys, a separate role per Lambda.
-- 🩹 **Inline Lambda code** deployed with the template. → *Production:* CI/CD,
-  versioned artifacts in S3/ECR, separate infra vs. app pipelines.
+- 🩹 **Inline Lambda code** deployed with the template, restating the pure
+  `enrichment.py` / `vcon.py` logic because inline code cannot import the repo
+  package at AWS runtime. → *Production:* CI/CD, versioned artifacts in S3/ECR, a
+  shared layer/package instead of copy-pasted logic, separate infra vs. app
+  pipelines.
+- 🩹 **Short / sample audio** so the Transcribe Medical batch finishes fast and
+  the reader sees the async pattern without a long wait. → *Production:* real
+  long-form audio; the async wait/poll/catch pattern is already correct for it.
+- 🩹 **Optional canned-transcript stub**: if there is no real recording (or
+  starting the job fails), `start-transcription-step` falls back to a canned
+  transcript so the pipeline is runnable end to end without a recording. →
+  *Production:* always run the real job, or use AWS HealthScribe for
+  clinician-grade notes + transcript in one service.
+- 🩹 **Minimal Comprehend Medical entity set** (meds + conditions only). →
+  *Production:* the full entity set with RxNorm / ICD-10-CM linking and
+  confidence thresholds.
+- 🩹 **Turn-index provenance mapped by timestamp overlap** (simple alignment of
+  medical segments to dialog turns). → *Production:* robust alignment between the
+  diarized medical transcript and the live turns (word-level timing, speaker
+  reconciliation).
 - 🩹 **SSE-S3 default encryption**, no customer-managed KMS key. →
   *Production:* SSE-KMS with a CMK, key policy, and separate access scopes for
   full vs. redacted vCons.

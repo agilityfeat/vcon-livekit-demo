@@ -12,7 +12,10 @@ Behavior on flush (:func:`persist_vcon`):
   ``ContentType=application/json``. Then, if ``STATE_MACHINE_ARN`` is also set,
   trigger enrichment via Step Functions ``start_execution`` with input
   ``json.dumps({"vcon": <doc>})`` -- the exact envelope the Spec 0 state machine
-  unwraps with ``event.get("vcon", event)``.
+  unwraps with ``event.get("vcon", event)`` -- and a deterministic ``name``
+  (see :func:`~vcon_agent.vcon.execution_name`) derived from the idempotency key
+  ``room_name + session start`` so a retried start is a no-op, not a duplicate
+  run.
 * If ``BUCKET_NAME`` is NOT set, write the vCon JSON to a local file under a
   ``vcon-output/`` directory using the same run-key path layout, and skip
   StartExecution entirely (no AWS client is created or called).
@@ -37,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .vcon import run_key
+from .vcon import execution_name, run_key
 
 # Environment variable names (map of CloudFormation Outputs -> local .env).
 ENV_BUCKET_NAME = "BUCKET_NAME"
@@ -149,9 +152,13 @@ def persist_vcon(
             if sfn_client is None:
                 sfn_client = _make_boto3_client("stepfunctions", region)
             # Envelope must match the Spec 0 pipeline, which unwraps exactly once
-            # with event.get("vcon", event).
+            # with event.get("vcon", event). The execution name is a deterministic
+            # idempotency key derived from (room_name + session start) so a
+            # retried StartExecution with the same inputs is a no-op rather than a
+            # duplicate pipeline run (see vcon.execution_name).
             response = sfn_client.start_execution(
                 stateMachineArn=state_machine_arn,
+                name=execution_name(room_name, session_start_iso),
                 input=json.dumps({"vcon": vcon_doc}),
             )
             enrichment_triggered = True

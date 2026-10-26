@@ -17,9 +17,9 @@ documents.
 
 The AWS backend is defined in one flat CloudFormation template
 (`infrastructure/template.yaml`): an S3 bucket for recordings and vCon JSON, a
-Step Functions state machine orchestrating the stubbed enrichment Lambdas, and
-the IAM roles granting access to Transcribe Medical, Comprehend Medical,
-Bedrock, and S3.
+Step Functions state machine orchestrating the real enrichment pipeline
+(Transcribe Medical, Comprehend Medical, and Bedrock), and the IAM roles
+granting access to those services and S3.
 
 For full deploy, configuration, and teardown instructions, including the
 one-command deploy, mapping stack Outputs into a local `.env` (copied from
@@ -226,3 +226,83 @@ builder are all unit-tested offline with fakes (no live LiveKit/AWS).
   egress.
 - 🩹 **Audio only, no video** egress. → *Production:* configurable, with video
   egress if the clinical workflow needs it.
+
+## Enrichment pipeline (Spec 3)
+
+Spec 3 runs the **AI enrichment** after the call and writes the results into the
+vCon `analysis[]` with **turn-level provenance**. The backend is a Step Functions
+state machine (`infrastructure/template.yaml`) whose steps mirror the pure,
+offline-tested logic in `src/vcon_agent/enrichment.py` and
+`src/vcon_agent/vcon.py`.
+
+### Deterministic, idempotent trigger
+
+The local agent starts the pipeline itself: on session end it PUTs the skeleton
+vCon to S3 and calls Step Functions `StartExecution` directly (boto3, local AWS
+creds), passing input `{"vcon": <doc>}` and a **deterministic execution name**
+derived from the idempotency key `room_name + session start`
+(`vcon.execution_name`). Because the name is deterministic and Step Functions
+rejects a duplicate name, a retried start is a **no-op** rather than a second
+run. There is **no EventBridge or webhook** on the critical path.
+
+Step Functions is chosen over a single Lambda because Transcribe Medical batch is
+asynchronous and can exceed Lambda's 15-minute timeout. The state machine owns
+the waiting (a `Wait` state plus a `GetMedicalTranscriptionJob` poll plus a
+`Choice` loop) and the retry/catch, so no Lambda ever sleeps past its timeout.
+
+### What the pipeline does
+
+1. **Poll S3 for the recording** before transcribing, so the pipeline never runs
+   on a missing or partial file. A `Choice` + `Wait` loop retries until the
+   object is present.
+2. **Transcribe Medical (batch, authoritative).** The recording is transcribed
+   and the result is stored as an `analysis[]` **transcript** object marked
+   `authoritative`, referencing the dialog turns it covers. It is kept
+   **alongside** the live Deepgram transcript already in `dialog[]`.
+3. **Comprehend Medical (meds + conditions).** Clinical entities are extracted
+   and stored as an `analysis[]` **entities** object referencing the dialog turn
+   index they came from.
+4. **Bedrock (physician summary).** A concise physician-facing summary is stored
+   as an `analysis[]` **summary** object referencing the dialog turns it was
+   built from.
+
+Comprehend and Bedrock run as a **parallel** branch; a final merge step writes
+the three analysis entries in a deterministic order: `transcript`, `entities`,
+`summary`.
+
+### Dual transcript: a feature, not a bug
+
+This is where "why not just the live transcript?" gets answered. The real-time
+agent STT (Deepgram) is tuned for **latency**; Transcribe Medical is tuned for
+**clinical accuracy**. Rather than discard one, vCon holds **both** with
+provenance: the live transcript stays in `dialog[]`, and the clinical transcript
+is an `analysis[]` entry marked `authoritative`. The two producers come from the
+two domains, and vCon models both natively over the same dialog, so nothing has
+to reconcile a Deepgram record and an AWS record by hand.
+
+### Offline verification
+
+The pipeline needs live AWS to run, so it is verified **offline** the same way
+the rest of the repo is: the correctness-critical shaping and provenance logic
+lives in pure, importable helpers (`src/vcon_agent/enrichment.py` and the
+`add_*_analysis` helpers in `vcon.py`) unit-tested with canned AWS-shaped inputs,
+and the template is checked with `cfn-lint` plus `python3 -m py_compile` on each
+inline Lambda body. The live end-to-end check is
+`infrastructure/scripts/validate-live.sh` (requires real AWS credentials).
+
+### Acknowledged shortcuts (demo) vs. production
+
+- 🩹 **Deterministic idempotency key = `room_name + session start`**, hashed into
+  the execution name. → *Production:* a stable server-assigned call/session id
+  (not a client-chosen room name), and a dedicated idempotency store if volume
+  demands it.
+- 🩹 **Short / sample audio** so the batch job finishes fast. → *Production:*
+  real long-form audio; the async pattern is already correct for it.
+- 🩹 **Optional canned-transcript stub** so the pipeline is runnable without a
+  real recording. → *Production:* the real job, or AWS HealthScribe for
+  clinician-grade notes + transcript in one service.
+- 🩹 **Provenance = simple turn-index references** mapped by timestamp overlap. →
+  *Production:* robust alignment between the diarized medical transcript and the
+  live turns.
+- 🩹 **Comprehend Medical kept to meds + conditions.** → *Production:* the full
+  entity set with RxNorm / ICD-10-CM linking.

@@ -9,7 +9,7 @@ import json
 import pytest
 
 from vcon_agent.persistence import persist_vcon
-from vcon_agent.vcon import VConBuilder
+from vcon_agent.vcon import VConBuilder, execution_name
 
 
 class FakeS3Client:
@@ -80,6 +80,16 @@ def test_s3_put_and_start_execution_with_injected_fakes():
     parsed_input = json.loads(sfn_call["input"])
     assert parsed_input["vcon"] == doc
 
+    # The execution name is the deterministic idempotency key derived from
+    # (room_name, session_start_iso), sanitized to the allowed charset so it
+    # never carries the ':' or '.' from the raw ISO session start.
+    assert sfn_call["name"] == execution_name(
+        "room-xyz", "2024-01-01T00:00:00+00:00"
+    )
+    assert ":" not in sfn_call["name"]
+    assert "." not in sfn_call["name"]
+    assert len(sfn_call["name"]) <= 80
+
     # Result reflects the S3 destination and triggered enrichment.
     assert result.destination == "s3"
     assert result.location == (
@@ -89,6 +99,44 @@ def test_s3_put_and_start_execution_with_injected_fakes():
     assert result.enrichment_triggered is True
     assert result.execution_arn == (
         "arn:aws:states:us-east-1:123:execution:fake:run"
+    )
+
+
+def test_start_execution_name_is_deterministic_across_calls():
+    """Two flushes with the same (room, session start) yield the same exec name,
+    which is what makes a retried StartExecution a no-op rather than a dup run."""
+    doc = _sample_doc()
+    env = {
+        "BUCKET_NAME": "my-bucket",
+        "STATE_MACHINE_ARN": "arn:aws:states:us-east-1:123:stateMachine:enrich",
+        "AWS_REGION": "us-east-1",
+    }
+
+    sfn1 = FakeSfnClient()
+    persist_vcon(
+        doc,
+        room_name="room-xyz",
+        session_start_iso="2024-01-01T00:00:00+00:00",
+        timestamp="1700000000",
+        env=env,
+        s3_client=FakeS3Client(),
+        sfn_client=sfn1,
+    )
+    sfn2 = FakeSfnClient()
+    persist_vcon(
+        doc,
+        room_name="room-xyz",
+        session_start_iso="2024-01-01T00:00:00+00:00",
+        # A different run timestamp must NOT change the execution name: the
+        # idempotency key is (room, session start), not the run-key timestamp.
+        timestamp="1700009999",
+        env=env,
+        s3_client=FakeS3Client(),
+        sfn_client=sfn2,
+    )
+
+    assert sfn1.start_execution_calls[0]["name"] == (
+        sfn2.start_execution_calls[0]["name"]
     )
 
 
