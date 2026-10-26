@@ -115,6 +115,14 @@ async def entrypoint(ctx: JobContext) -> None:
     # BEFORE any dialog turn is appended (the agent speaks the consent script as
     # its first utterance; the boolean attachment is captured up front per the
     # acknowledged shortcut).
+    #
+    # SHORTCUT: ``granted`` is hardcoded to True and is NOT yet derived from the
+    # patient's actual spoken answer. The agent reads the consent script and the
+    # patient's yes/no reply arrives later as an ordinary conversation item that
+    # lands in dialog[]; nothing wires that reply back into this boolean, and
+    # there is no consent-denied/abort path. Binding the recorded boolean to the
+    # patient's real response (and refusing to proceed on denial) is a Production
+    # concern per the spec's acknowledged consent shortcut.
     builder = VConBuilder()
     builder.add_consent(granted=True, script=DEFAULT_CONSENT_SCRIPT)
 
@@ -146,12 +154,19 @@ async def entrypoint(ctx: JobContext) -> None:
                 room_name,
                 session_start_iso,
             )
-            logger.info(
-                "persisted vCon to %s (%s); enrichment_triggered=%s",
-                result.location,
-                result.destination,
-                result.enrichment_triggered,
-            )
+            if result.s3_fallback_to_local:
+                logger.warning(
+                    "S3 flush failed; vCon salvaged to local file %s (%s)",
+                    result.location,
+                    result.destination,
+                )
+            else:
+                logger.info(
+                    "persisted vCon to %s (%s); enrichment_triggered=%s",
+                    result.location,
+                    result.destination,
+                    result.enrichment_triggered,
+                )
         except Exception:  # pragma: no cover - defensive; log and swallow
             logger.exception("failed to persist vCon on session end")
 

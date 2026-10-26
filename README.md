@@ -46,7 +46,12 @@ document **incrementally, turn by turn**, using the framework-independent core i
   Dialog turns reference parties by index, never by an embedded identity.
 - **Consent first:** the agent speaks a hardcoded consent script as its opening
   utterance, and the consent attachment (a boolean plus the script text) is
-  recorded up front, before any dialog turn is appended.
+  recorded up front, before any dialog turn is appended. Note the recorded
+  boolean is **hardcoded to `True`** and is **not yet derived from the patient's
+  actual answer**: the patient's yes/no reply arrives as an ordinary dialog turn
+  and is not bound back to the consent attachment, and there is no
+  consent-denied/abort path. Wiring the boolean to the real response (and
+  refusing to proceed on denial) is a Production concern (see shortcuts below).
 - **Dialog during the call:** on each `conversation_item_added` event, the
   committed message is translated into a dialog turn (`user` → party 0,
   `assistant` → party 1) and appended in order. That translation lives in the
@@ -66,6 +71,11 @@ When the session ends, the agent flushes the finished vCon **exactly once**
 - If `BUCKET_NAME` is unset, it writes the same document to a local file under
   `vcon-output/` using the identical run-key layout and skips enrichment, so the
   agent is demoable standalone with no AWS backend.
+
+Because the one-PUT model gives the call a single persistence opportunity, the
+S3 path is **fail-safe**: if the S3 PUT (or the guarded `StartExecution`) raises,
+the vCon is salvaged to a last-resort local file under `vcon-output/` (same
+run-key layout) instead of being lost, and the flush is logged as a warning.
 
 ### Setup
 
@@ -118,9 +128,16 @@ python3 -m pytest tests/ -q
 - 🩹 **Single hardcoded patient/agent identity** seeded into the two parties. →
   *Production:* authenticated participant identities (a verified patient record
   and the agent's service account).
-- 🩹 **One flush-to-S3 PUT on session end** (a single write of the whole vCon). →
-  *Production:* incremental/streamed persistence with retries and idempotency,
-  decoupled from the session lifecycle.
+- 🩹 **Hardcoded consent boolean**, captured up front and **not derived from the
+  patient's spoken answer** (no consent-denied/abort path, no binding of the
+  reply back to the attachment). → *Production:* parse the patient's actual
+  response, record the real decision, and refuse to proceed (and avoid
+  persisting clinical dialog) on denial.
+- 🩹 **One flush-to-S3 PUT on session end** (a single write of the whole vCon),
+  with a last-resort local-file salvage if that PUT fails so the one shot is
+  fail-safe rather than fail-open. → *Production:* incremental/streamed
+  persistence with retries and idempotency, decoupled from the session
+  lifecycle.
 
 Out of scope for Spec 1: authentication/authorization, multi-party calls, and any
 EHR integration.

@@ -17,6 +17,13 @@ Behavior on flush (:func:`persist_vcon`):
   ``vcon-output/`` directory using the same run-key path layout, and skip
   StartExecution entirely (no AWS client is created or called).
 
+Under the acknowledged "one flush PUT on session end" shortcut there is no
+retry or per-turn history, so the end-of-session write is the one and only
+chance to persist the whole call. To keep that one-shot model fail-safe rather
+than fail-open, :func:`persist_vcon` makes a last-resort local write under
+``vcon-output/`` (same run-key layout) if the S3 path raises, so a transient S3
+or StartExecution error does not silently lose the entire vCon.
+
 Config is read from the environment (``BUCKET_NAME``, ``STATE_MACHINE_ARN``,
 ``AWS_REGION``). These are OPTIONAL for Spec 1: the local-file fallback keeps the
 agent demoable standalone.
@@ -56,6 +63,9 @@ class PersistResult:
     key: str
     enrichment_triggered: bool
     execution_arn: Optional[str] = None
+    # True when the S3 path raised and the document was salvaged to a local file
+    # as a last resort (see the fail-safe note in the module docstring).
+    s3_fallback_to_local: bool = False
 
 
 def persist_vcon(
@@ -106,10 +116,7 @@ def persist_vcon(
 
     # Local-file fallback: no bucket configured. Never touch AWS.
     if not bucket_name:
-        base = Path(local_output_dir) if local_output_dir else Path(LOCAL_OUTPUT_DIR)
-        out_path = base / key
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_bytes(body_bytes)
+        out_path = _write_local(body_bytes, key, local_output_dir)
         return PersistResult(
             destination="local",
             location=str(out_path),
@@ -118,32 +125,50 @@ def persist_vcon(
         )
 
     # S3 path. Create a real client lazily only if one was not injected.
+    #
+    # Fail-safe for the one-PUT shortcut: this is the single persistence
+    # opportunity for the whole call, so if the S3 PUT (or the guarded
+    # StartExecution) raises, we salvage the document to a last-resort local
+    # file instead of letting the entire vCon vanish with only a log line.
     region = env.get(ENV_AWS_REGION)
-    if s3_client is None:
-        s3_client = _make_boto3_client("s3", region)
-    s3_client.put_object(
-        Bucket=bucket_name,
-        Key=key,
-        Body=body_bytes,
-        ContentType="application/json",
-    )
-
-    # Guarded enrichment hook: only when a state machine ARN is configured.
-    enrichment_triggered = False
-    execution_arn: Optional[str] = None
-    state_machine_arn = env.get(ENV_STATE_MACHINE_ARN)
-    if state_machine_arn:
-        if sfn_client is None:
-            sfn_client = _make_boto3_client("stepfunctions", region)
-        # Envelope must match the Spec 0 pipeline, which unwraps exactly once
-        # with event.get("vcon", event).
-        response = sfn_client.start_execution(
-            stateMachineArn=state_machine_arn,
-            input=json.dumps({"vcon": vcon_doc}),
+    try:
+        if s3_client is None:
+            s3_client = _make_boto3_client("s3", region)
+        s3_client.put_object(
+            Bucket=bucket_name,
+            Key=key,
+            Body=body_bytes,
+            ContentType="application/json",
         )
-        enrichment_triggered = True
-        if isinstance(response, dict):
-            execution_arn = response.get("executionArn")
+
+        # Guarded enrichment hook: only when a state machine ARN is configured.
+        enrichment_triggered = False
+        execution_arn: Optional[str] = None
+        state_machine_arn = env.get(ENV_STATE_MACHINE_ARN)
+        if state_machine_arn:
+            if sfn_client is None:
+                sfn_client = _make_boto3_client("stepfunctions", region)
+            # Envelope must match the Spec 0 pipeline, which unwraps exactly once
+            # with event.get("vcon", event).
+            response = sfn_client.start_execution(
+                stateMachineArn=state_machine_arn,
+                input=json.dumps({"vcon": vcon_doc}),
+            )
+            enrichment_triggered = True
+            if isinstance(response, dict):
+                execution_arn = response.get("executionArn")
+    except Exception:
+        # Last resort: don't lose the call. Write the same bytes to the same
+        # run-key path locally so the vCon survives a transient S3 outage,
+        # expired credentials, or a StartExecution throttle at shutdown.
+        out_path = _write_local(body_bytes, key, local_output_dir)
+        return PersistResult(
+            destination="local",
+            location=str(out_path),
+            key=key,
+            enrichment_triggered=False,
+            s3_fallback_to_local=True,
+        )
 
     return PersistResult(
         destination="s3",
@@ -152,6 +177,20 @@ def persist_vcon(
         enrichment_triggered=enrichment_triggered,
         execution_arn=execution_arn,
     )
+
+
+def _write_local(body_bytes: bytes, key: str, local_output_dir: Optional[str]) -> Path:
+    """Write ``body_bytes`` to ``<local_output_dir or vcon-output>/<key>``.
+
+    Creates parent directories as needed and returns the path written. Shared by
+    the no-bucket fallback and the S3 last-resort salvage so both use the
+    identical run-key layout.
+    """
+    base = Path(local_output_dir) if local_output_dir else Path(LOCAL_OUTPUT_DIR)
+    out_path = base / key
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(body_bytes)
+    return out_path
 
 
 def _make_boto3_client(service_name: str, region: Optional[str]) -> Any:
