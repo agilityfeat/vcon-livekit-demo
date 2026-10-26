@@ -21,10 +21,13 @@
         # Native libraries the pip-installed wheels load at runtime. numpy's
         # C-extensions (pulled in transitively via livekit.rtc) need the GNU C++
         # runtime (libstdc++.so.6), which stdenv.cc.cc.lib provides; zlib is a
-        # common additional requirement.
+        # common additional requirement. portaudio provides libportaudio.so.2,
+        # which the sounddevice package used by LiveKit's console mode dlopens
+        # at runtime for local mic/speaker audio.
         nativeLibs = [
           pkgs.stdenv.cc.cc.lib
           pkgs.zlib
+          pkgs.portaudio
         ];
       in
       {
