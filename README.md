@@ -175,13 +175,13 @@ python3 -m pytest tests/ -q
 Out of scope: authentication/authorization, multi-party calls, and any
 EHR integration.
 
-## Call recording (Spec 2)
+## Call recording
 
-Spec 2 captures the **call audio** to S3 and surfaces its location on the vCon so
-the enrichment pipeline (Spec 3) can find and transcribe it. When the agent
+The agent captures the **call audio** to S3 and surfaces its location on the vCon so
+the enrichment pipeline can find and transcribe it. When the agent
 joins a room (right after `ctx.connect()`), it starts a LiveKit
 **room-composite, audio-only egress** that writes an OGG recording directly to
-the Spec 0 S3 bucket.
+the S3 bucket.
 
 ### Where the recording lands
 
@@ -198,7 +198,7 @@ recording key and the vCon flush, so `recording_key(...)` and `run_key(...)`
 always resolve to the same run prefix. This layout matches the S3
 unique-key-per-run convention documented in
 **[infrastructure/README.md](infrastructure/README.md)**; the unique key plus
-Spec 0 bucket **versioning** together neutralize the "a later egress overwrites
+the bucket's **versioning** together neutralize the "a later egress overwrites
 the earlier file" failure mode.
 
 ### Recording location on the vCon
@@ -216,23 +216,23 @@ location.
 ### Readiness is decoupled from egress webhooks
 
 Rather than relying on the LiveKit `egress_ended` webhook to drive downstream
-processing, readiness is **poll-based**: Spec 3 polls S3 for the object at the
+processing, readiness is **poll-based**: the enrichment pipeline polls S3 for the object at the
 known recording key. This sidesteps the duplicate / early / missing-webhook
 failure modes. The agent may subscribe to `egress_ended` for
 logging/observability only; it is explicitly **not on the critical path** and
 triggers no processing.
 
-### Env-optional, same as Spec 1
+### Env-optional
 
 Live egress needs `BUCKET_NAME` + `AWS_REGION` **and** the LiveKit credentials
 (`LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET`). When `BUCKET_NAME` or
 the LiveKit creds are absent, the agent **skips egress gracefully** (logged, the
 call is never broken) so the standalone local demo still runs, mirroring the
-env-optional behavior of the Spec 1 persistence layer. `AWS_ACCESS_KEY_ID` /
+env-optional behavior of the persistence layer. `AWS_ACCESS_KEY_ID` /
 `AWS_SECRET_ACCESS_KEY` are used for the S3 upload credentials if present and
 otherwise fall back to the instance role.
 
-Like Spec 1's live voice path, the **live egress path is not part of automated
+The **live egress path is not part of automated
 verification**: it needs real LiveKit and AWS credentials and cannot be
 exercised offline. The egress call sits behind an injectable/mockable seam, so
 the recording-key helper, the recording dialog object, and the egress-request
@@ -241,9 +241,8 @@ builder are all unit-tested offline with fakes (no live LiveKit/AWS).
 ### Acknowledged shortcuts (demo) vs. production
 
 - 🩹 **Plain SSE-S3, no customer-managed KMS key** for the recordings. →
-  *Production:* SSE-KMS with a CMK, bucket policy, and VPC endpoints. (Spec 4
-  still demonstrates JWE on the vCon itself.)
-- 🩹 **Poll-based readiness** (Spec 3 polls S3 at the recording key with a simple
+  *Production:* SSE-KMS with a CMK, bucket policy, and VPC endpoints.
+- 🩹 **Poll-based readiness** (polls S3 at the recording key with a simple
   timeout/retry). → *Production:* event-driven readiness with proper dedupe on
   `egressId`, reconciliation for missing events, and handling of early/truncated
   egress.

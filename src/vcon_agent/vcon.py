@@ -252,7 +252,7 @@ class VConBuilder:
         represents the whole call.
 
         SHORTCUT (acknowledged): audio only (no video); plain SSE-S3 (no CMK);
-        readiness is handled later by Spec 3 polling S3 at the recording key, not
+        readiness is handled by polling S3 at the recording key, not
         event-driven here. Production would support configurable video egress,
         SSE-KMS with a CMK, and event-driven readiness with proper dedupe on the
         egress id and reconciliation for missing/early/truncated egress events.

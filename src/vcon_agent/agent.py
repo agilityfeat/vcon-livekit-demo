@@ -167,8 +167,8 @@ async def _default_start_egress(
 
     Kept behind the injectable ``start_egress`` seam in :func:`entrypoint` so
     unit tests pass a fake and never open a connection. This live path (real
-    LiveKit/AWS) is NOT automatically verifiable in the sandbox, the same stance
-    Spec 1 took for the live voice path.
+    LiveKit/AWS) is NOT automatically verifiable in the sandbox, consistent with
+    the live voice path, which also is not automatically verifiable.
     """
     client = api.LiveKitAPI(url, api_key, api_secret)
     try:
@@ -250,8 +250,9 @@ async def _maybe_start_recording_egress(
         )
     except Exception:  # defensive: never break the call on an egress error
         logger.exception("failed to start recording egress; continuing call")
-        # Still record the intended recording location on the vCon so Spec 3's
-        # S3 poll has a key to look for even if the start call hiccuped.
+        # Still record the intended recording location on the vCon so the
+        # enrichment pipeline's S3 poll has a key to look for even if the start
+        # call hiccuped.
 
     # Thread the recording location into the vCon as an external reference.
     builder.add_recording_dialog(url)
@@ -350,8 +351,9 @@ async def entrypoint(ctx: JobContext) -> None:
     # it never breaks the call.
     #
     # NOT on the critical path: we deliberately do NOT drive processing from an
-    # ``egress_ended`` webhook/event. Spec 3 polls S3 at the recording key for
-    # readiness instead, which sidesteps the duplicate / early / missing-webhook
+    # ``egress_ended`` webhook/event. The enrichment pipeline polls S3 at the
+    # recording key for readiness instead, which sidesteps the duplicate / early
+    # / missing-webhook
     # failure modes. A real deployment MAY still subscribe to egress status for
     # logging/observability only, but that is never the trigger for enrichment.
     await _maybe_start_recording_egress(
