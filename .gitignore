@@ -1,0 +1,23 @@
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+
+# CloudFormation packaging output
+packaged.yaml
+*.packaged.yaml
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.cfnenv/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

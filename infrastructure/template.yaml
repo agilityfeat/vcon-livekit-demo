@@ -1,0 +1,412 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+# =============================================================================
+# Cloud infrastructure for the vCon + LiveKit demo
+# -----------------------------------------------------------------------------
+# A single, flat CloudFormation template that provisions the minimal AWS backend
+# the local application consumes:
+#
+#   * S3 bucket        - holds recordings (from LiveKit Egress) plus the
+#                        skeleton / enriched / redacted vCon JSON documents,
+#                        using a unique-key-per-run convention
+#                        (room_name + session start + timestamp prefix).
+#   * Lambda functions - the (stubbed) enrichment pipeline steps, invoked by the
+#                        state machine. Inline Python via Code.ZipFile.
+#   * State machine    - Step Functions orchestrator that runs the pipeline
+#                        Lambdas in sequence; invoked by the local app via
+#                        StartExecution.
+#   * IAM roles        - a Step Functions execution role and a Lambda execution
+#                        role granting the permissions the pipeline needs.
+#
+# Explicitly NOT created (these are managed services you CALL, not resources you
+# create - the template only grants IAM permission to use them):
+#   * Transcribe Medical, Comprehend Medical, Bedrock
+#   * Bedrock model access (a per-model console opt-in; see README prerequisite)
+#   * No EventBridge / webhook endpoint (enrichment is triggered via
+#     StartExecution by the local app)
+#   * No compute for the agent (no ECS / EC2 / Fargate; the agent runs locally)
+# =============================================================================
+
+Description: >-
+  Cloud infrastructure for the vCon + LiveKit demo: an S3 bucket
+  (versioning + SSE-S3), a Step Functions state machine orchestrating a stubbed
+  enrichment pipeline, inline-code pipeline Lambda functions, and least-needed
+  IAM roles for Transcribe Medical / Comprehend Medical / Bedrock / S3.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: vcon-livekit-demo
+    Description: >-
+      Short name used to compose resource names and tags. Lowercase letters,
+      digits and hyphens.
+    AllowedPattern: '^[a-z0-9-]+$'
+    MinLength: 3
+    MaxLength: 40
+
+  Environment:
+    Type: String
+    Default: dev
+    Description: Deployment environment suffix used in resource names and tags.
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # S3 bucket: recordings + skeleton/enriched/redacted vCons.
+  #
+  # BucketName is derived with !Sub from ProjectName + Environment + AccountId +
+  # Region so it is globally unique and does not collide across accounts/regions.
+  #
+  # Shortcut (acknowledged): SSE-S3 (AES256) default encryption, not a
+  # customer-managed KMS key. Production would use SSE-KMS with a CMK, a key
+  # policy, and separate access scopes for full vs. redacted vCons.
+  #
+  # Versioning is enabled as cheap insurance against accidental object overwrites.
+  # ---------------------------------------------------------------------------
+  RecordingsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-${AWS::AccountId}-${AWS::Region}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------------------------
+  # Lambda execution role (trusts lambda.amazonaws.com).
+  #
+  # Shortcut (acknowledged): BROAD-ISH, SERVICE-LEVEL IAM for demo readability -
+  # a single shared role, service-level actions, and a single bucket scope.
+  # Production would use least-privilege per action/resource, condition keys, and
+  # a separate role per Lambda.
+  # ---------------------------------------------------------------------------
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        # CloudWatch Logs (AWSLambdaBasicExecutionRole-equivalent).
+        - PolicyName: cloudwatch-logs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
+        # Transcribe Medical: start/get transcription jobs.
+        - PolicyName: transcribe-medical
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - transcribe:StartMedicalTranscriptionJob
+                  - transcribe:GetMedicalTranscriptionJob
+                  - transcribe:ListMedicalTranscriptionJobs
+                Resource: '*'
+        # Comprehend Medical: entity + PHI detection (the V2 detectors).
+        - PolicyName: comprehend-medical
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - comprehendmedical:DetectEntitiesV2
+                  - comprehendmedical:DetectPHI
+                  - comprehendmedical:InferICD10CM
+                  - comprehendmedical:InferRxNorm
+                Resource: '*'
+        # Bedrock: invoke a foundation model for enrichment/summarisation.
+        - PolicyName: bedrock-invoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: '*'
+        # S3 read/write scoped to the created bucket and its objects.
+        - PolicyName: s3-bucket-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:GetObjectVersion
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt RecordingsBucket.Arn
+                  - !Sub '${RecordingsBucket.Arn}/*'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------------------------
+  # Pipeline Lambda functions (stubbed).
+  #
+  # Each function is a pass-through stub that echoes/annotates its portion of the
+  # vCon skeleton, so the state machine can run end to end on a canned input.
+  # Shortcut (acknowledged): inline code via Code.ZipFile instead of versioned
+  # artifacts in S3/ECR built by a CI/CD pipeline.
+  # ---------------------------------------------------------------------------
+  TranscribeStepFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-transcribe-step'
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 60
+      MemorySize: 128
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          # STUB: in production this starts an AWS Transcribe Medical job on the
+          # recording in S3 and attaches the transcript dialog to the vCon.
+          #
+          # Unwrap convention: every step unwraps exactly once with
+          # event.get("vcon", event). The first step receives the raw
+          # StartExecution input {"vcon": <doc>}; each subsequent step receives
+          # the previous step's output envelope {"vcon": <doc>, ...}. One unwrap
+          # always yields the vCon document, never its top-level version string.
+          def handler(event, context):
+              vcon = event.get("vcon", event)
+              analysis = vcon.setdefault("analysis", [])
+              analysis.append({
+                  "type": "transcript",
+                  "vendor": "aws-transcribe-medical",
+                  "body": "STUBBED transcript - transcribe step ran",
+              })
+              return {"vcon": vcon, "step": "transcribe", "status": "ok"}
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  ComprehendStepFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-comprehend-step'
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 60
+      MemorySize: 128
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          # STUB: in production this calls Comprehend Medical to detect PHI and
+          # clinical entities, then produces a redacted copy of the vCon.
+          #
+          # Each step receives the previous step's output envelope
+          # {"vcon": <doc>, "step": ..., "status": ...} and unwraps exactly once
+          # to recover the vCon document (the same single unwrap the Transcribe
+          # step uses), so the three stubs agree on the envelope shape.
+          def handler(event, context):
+              vcon = event.get("vcon", event)
+              analysis = vcon.setdefault("analysis", [])
+              analysis.append({
+                  "type": "phi-detection",
+                  "vendor": "aws-comprehend-medical",
+                  "body": "STUBBED PHI detection - comprehend/redact step ran",
+              })
+              return {"vcon": vcon, "step": "comprehend", "status": "ok"}
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  EnrichStepFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-enrich-step'
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 60
+      MemorySize: 128
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          # STUB: in production this calls Bedrock (bedrock:InvokeModel) to
+          # summarise/enrich the conversation, then writes the enriched vCon to
+          # S3 under the unique-key-per-run prefix.
+          #
+          # Unwraps the incoming envelope exactly once (same as the other two
+          # steps) to recover the vCon document.
+          def handler(event, context):
+              vcon = event.get("vcon", event)
+              analysis = vcon.setdefault("analysis", [])
+              analysis.append({
+                  "type": "summary",
+                  "vendor": "aws-bedrock",
+                  "body": "STUBBED summary - enrich/bedrock step ran",
+              })
+              return {"vcon": vcon, "step": "enrich", "status": "ok"}
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------------------------
+  # CloudWatch Logs group for the state machine execution logs.
+  # ---------------------------------------------------------------------------
+  StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub '/aws/vendedlogs/states/${ProjectName}-${Environment}-pipeline'
+      RetentionInDays: 14
+
+  # ---------------------------------------------------------------------------
+  # Step Functions execution role (trusts states.amazonaws.com).
+  # Allows invoking the pipeline Lambdas and writing execution logs.
+  # ---------------------------------------------------------------------------
+  StateMachineExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-sfn-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-pipeline-lambdas
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt TranscribeStepFunction.Arn
+                  - !GetAtt ComprehendStepFunction.Arn
+                  - !GetAtt EnrichStepFunction.Arn
+        # CloudWatch Logs for Step Functions logging. These log actions must be
+        # granted on "*" per the Step Functions logging requirements.
+        - PolicyName: state-machine-logging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: '*'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------------------------
+  # Step Functions state machine: the enrichment orchestrator.
+  #
+  # A simple sequential Task workflow (Transcribe -> Comprehend -> Enrich ->
+  # Succeed). The DefinitionString uses !Sub to inject the Lambda ARNs. It
+  # accepts a canned skeleton vCon as input and passes it through the stubbed
+  # steps, so the whole pipeline runs end to end.
+  # ---------------------------------------------------------------------------
+  EnrichmentStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${ProjectName}-${Environment}-enrichment'
+      RoleArn: !GetAtt StateMachineExecutionRole.Arn
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StateMachineLogGroup.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Stubbed vCon enrichment pipeline.",
+          "StartAt": "Transcribe",
+          "States": {
+            "Transcribe": {
+              "Type": "Task",
+              "Resource": "${TranscribeStepFunction.Arn}",
+              "Next": "Comprehend"
+            },
+            "Comprehend": {
+              "Type": "Task",
+              "Resource": "${ComprehendStepFunction.Arn}",
+              "Next": "Enrich"
+            },
+            "Enrich": {
+              "Type": "Task",
+              "Resource": "${EnrichStepFunction.Arn}",
+              "Next": "Done"
+            },
+            "Done": {
+              "Type": "Succeed"
+            }
+          }
+        }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  BucketName:
+    Description: >-
+      Name of the S3 bucket for recordings and vCons. Maps to BUCKET_NAME in the
+      local .env.
+    Value: !Ref RecordingsBucket
+
+  StateMachineArn:
+    Description: >-
+      ARN of the enrichment Step Functions state machine, invoked via
+      StartExecution. Maps to STATE_MACHINE_ARN in the local .env.
+    Value: !Ref EnrichmentStateMachine
+
+  Region:
+    Description: >-
+      AWS region the stack was deployed into. Maps to AWS_REGION in the local
+      .env.
+    Value: !Ref AWS::Region
