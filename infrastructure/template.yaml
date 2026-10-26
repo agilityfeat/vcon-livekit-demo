@@ -437,6 +437,7 @@ Resources:
                       return {
                           "vcon": vcon,
                           "step": "start-transcription",
+                          "recording_key": key,
                           "job_name": job_name,
                           "canned": False,
                       }
@@ -458,6 +459,7 @@ Resources:
               return {
                   "vcon": vcon,
                   "step": "start-transcription",
+                  "recording_key": key,
                   "job_name": job_name,
                   "canned": True,
                   "canned_transcript": _CANNED_TRANSCRIPT,
@@ -558,6 +560,7 @@ Resources:
                   return {
                       "vcon": vcon,
                       "step": "get-transcription",
+                      "recording_key": event.get("recording_key"),
                       "job_name": event.get("job_name"),
                       "transcription_status": "COMPLETED",
                       "transcript_text": event.get("canned_transcript", ""),
@@ -588,6 +591,7 @@ Resources:
               out = {
                   "vcon": vcon,
                   "step": "get-transcription",
+                  "recording_key": event.get("recording_key"),
                   "job_name": job_name,
                   "transcription_status": status,
               }
@@ -684,6 +688,7 @@ Resources:
               return {
                   "vcon": vcon,
                   "step": "comprehend",
+                  "recording_key": event.get("recording_key"),
                   "entities": entities,
                   "entities_dialog_index": _first_patient_turn_index(vcon),
                   "transcript_text": transcript_text,
@@ -828,6 +833,7 @@ Resources:
               return {
                   "vcon": vcon,
                   "step": "bedrock",
+                  "recording_key": event.get("recording_key"),
                   "summary_text": summary_text,
                   "summary_dialog_indices": _dialog_indices(vcon),
                   "summary_degraded": degraded,
@@ -895,6 +901,16 @@ Resources:
               vcon = base.get("vcon", base)
               vcon.setdefault("analysis", [])
 
+              # Thread the run-key through to the Seal step: Step Functions passes
+              # each task's output verbatim, so the recording_key set by
+              # poll-recording must be re-emitted by every intermediate step. The
+              # Parallel branches each carry it; take it from whichever branch has
+              # it so Seal can locate the run-key S3 prefix.
+              recording_key = (
+                  comprehend.get("recording_key")
+                  or bedrock.get("recording_key")
+              )
+
               transcript_text = comprehend.get("transcript_text", "") or ""
               covered = _text_dialog_indices(vcon)
 
@@ -943,7 +959,12 @@ Resources:
                   summary_entry["degraded"] = summary_degraded
               vcon["analysis"].append(summary_entry)
 
-              return {"vcon": vcon, "step": "merge", "status": "ok"}
+              return {
+                  "vcon": vcon,
+                  "step": "merge",
+                  "status": "ok",
+                  "recording_key": recording_key,
+              }
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -1167,19 +1188,40 @@ Resources:
               return reference
 
 
-          def _detect_phi_spans(text):
+          def _make_detect_phi_spans(degraded_sink):
               # Mirror seam for the AWS Comprehend Medical DetectPHI pass: return
               # (BeginOffset, EndOffset) spans for the text. The pure core in
               # sealing.py NEVER calls AWS; here the inline Lambda supplies the
               # real callable while regex spans are ALWAYS applied too.
-              resp = _CM.detect_phi(Text=text)
-              spans = []
-              for ent in resp.get("Entities", []) or []:
-                  begin = ent.get("BeginOffset")
-                  end = ent.get("EndOffset")
-                  if begin is not None and end is not None:
-                      spans.append((begin, end))
-              return spans
+              #
+              # 🩹 Fail-open for demo-runnability: the per-field DetectPHI call is
+              # wrapped so a throttle / 5xx / model-access failure on ANY field
+              # degrades to regex-only redaction rather than failing the whole
+              # Seal step, matching how the Comprehend / Bedrock steps wrap their
+              # real call. The first failure is recorded in `degraded_sink` so an
+              # operator can tell regex-only redaction apart from a clean pass.
+              # → Production: a Catch to a visible alarm state, retries with
+              # backoff, and a hard failure path surfaced to operators.
+              def _detect_phi_spans(text):
+                  try:
+                      resp = _CM.detect_phi(Text=text)
+                  except Exception as exc:
+                      if not degraded_sink:
+                          degraded_sink.append(
+                              "comprehend-medical detect_phi failed: {}".format(
+                                  type(exc).__name__
+                              )
+                          )
+                      return []
+                  spans = []
+                  for ent in resp.get("Entities", []) or []:
+                      begin = ent.get("BeginOffset")
+                      end = ent.get("EndOffset")
+                      if begin is not None and end is not None:
+                          spans.append((begin, end))
+                  return spans
+
+              return _detect_phi_spans
 
 
           def _prefix_from_recording_key(recording_key):
@@ -1203,34 +1245,23 @@ Resources:
               signed_jws = _sign_vcon(vcon, private_key)
               full_jwe = _encrypt_vcon(signed_jws, public_key)
 
-              # Build the redacted sibling. Attempt a Comprehend Medical DetectPHI
-              # pass over the known text fields as the detect_phi seam; regex
-              # spans are always applied too.
-              #
-              # 🩹 Fail-open for demo-runnability: a Comprehend Medical DetectPHI
-              # failure (model access denied, throttling, etc.) falls back to
-              # regex-only redaction rather than failing the whole execution, BUT
-              # we carry a `degraded` marker so an operator can tell regex-only
-              # redaction apart from a silent failure. → Production: a Catch to a
-              # visible alarm state, retries with backoff, and a hard failure path
-              # surfaced to operators.
-              degraded = None
-              detect_phi = _detect_phi_spans
-              try:
-                  _CM.detect_phi(Text="probe")
-              except Exception as exc:
-                  detect_phi = None
-                  degraded = "comprehend-medical detect_phi failed: {}".format(
-                      type(exc).__name__
-                  )
+              # Build the redacted sibling. The Comprehend Medical DetectPHI pass
+              # over the known text fields is the detect_phi seam; regex spans are
+              # always applied too. The per-field call is wrapped (fail-open):
+              # the first failure degrades to regex-only and records a marker in
+              # `degraded_spans`, so no single field failure can crash the step.
+              degraded_spans = []
+              detect_phi = _make_detect_phi_spans(degraded_spans)
 
               full_uuid = vcon.get("uuid")
               reference = _build_redacted_reference(full_uuid)
               redacted = _redact_vcon(vcon, reference, detect_phi)
+              degraded = degraded_spans[0] if degraded_spans else None
 
               # PUT the three sibling objects next to vcon-skeleton.json under the
-              # run-key prefix. The redacted sibling's `redacted` pointer is also
-              # updated with the full JWE object url once the prefix is known.
+              # run-key prefix. The redacted sibling's `redacted` pointer carries
+              # the full JWE object url, set as soon as the prefix is known so a
+              # consumer reading `redacted` sees the url even if a PUT fails.
               prefix = _prefix_from_recording_key(event.get("recording_key"))
               put_keys = {}
               if bucket and prefix:
