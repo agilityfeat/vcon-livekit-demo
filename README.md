@@ -138,6 +138,16 @@ python3 -m pytest tests/ -q
   fail-safe rather than fail-open. → *Production:* incremental/streamed
   persistence with retries and idempotency, decoupled from the session
   lifecycle.
+- 🩹 **Agent triggers enrichment directly** by calling Step Functions
+  `StartExecution` from the agent process right after the single S3 PUT (guarded
+  on `STATE_MACHINE_ARN`). → *Production:* event-driven persistence where the
+  agent's only AWS touchpoint is the single S3 PUT and the enrichment state
+  machine is triggered by the S3 object-created event (S3 notification →
+  EventBridge → Step Functions, or S3 → Lambda → `StartExecution`). This
+  decouples the agent (no `states:StartExecution` permission or state-machine
+  ARN awareness), better matches the "no AWS in the agent process" design note,
+  and removes the current failure mode where the PUT succeeds but the subsequent
+  `StartExecution` fails, so enrichment silently never fires.
 
 Out of scope for Spec 1: authentication/authorization, multi-party calls, and any
 EHR integration.
