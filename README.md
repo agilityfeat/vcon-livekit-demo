@@ -26,7 +26,7 @@ one-command deploy, mapping stack Outputs into a local `.env` (copied from
 `.env.example`), the manual Bedrock model-access prerequisite, and local
 validation, see **[infrastructure/README.md](infrastructure/README.md)**.
 
-## Intake agent (Spec 1)
+## Intake agent
 
 The intake agent is a [LiveKit Agents](https://docs.livekit.io/agents/) worker
 (`src/vcon_agent/agent.py`) that joins a room and runs a short, scripted patient
@@ -63,8 +63,8 @@ document **incrementally, turn by turn**, using the framework-independent core i
 When the session ends, the agent flushes the finished vCon **exactly once**
 (`src/vcon_agent/persistence.py`):
 
-- If `BUCKET_NAME` is set, it PUTs the vCon JSON to S3 under the Spec 0
-  unique-key-per-run convention
+- If `BUCKET_NAME` is set, it PUTs the vCon JSON to the AWS enrichment backend's
+  S3 bucket under the unique-key-per-run convention
   `<room_name>/<session_start_iso>/<timestamp>/vcon-skeleton.json`, then (only if
   `STATE_MACHINE_ARN` is also set) triggers enrichment via a guarded Step
   Functions `StartExecution` with input `{"vcon": <doc>}`.
@@ -92,7 +92,7 @@ The `.env` file configures the LiveKit connection
 (`LIVEKIT_URL`/`LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET`), the provider keys
 (`DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `OPENAI_API_KEY`), and the optional
 AWS backend (`BUCKET_NAME`, `STATE_MACHINE_ARN`, `AWS_REGION`). The AWS variables
-are optional for Spec 1; leave them blank to use the local-file fallback.
+are optional; leave them blank to use the local-file fallback.
 
 ### Run the agent (live)
 
@@ -149,5 +149,5 @@ python3 -m pytest tests/ -q
   and removes the current failure mode where the PUT succeeds but the subsequent
   `StartExecution` fails, so enrichment silently never fires.
 
-Out of scope for Spec 1: authentication/authorization, multi-party calls, and any
+Out of scope: authentication/authorization, multi-party calls, and any
 EHR integration.

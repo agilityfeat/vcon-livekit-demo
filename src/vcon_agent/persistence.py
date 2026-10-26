@@ -11,7 +11,7 @@ Behavior on flush (:func:`persist_vcon`):
   (``<room_name>/<session_start_iso>/<timestamp>/vcon-skeleton.json``) with
   ``ContentType=application/json``. Then, if ``STATE_MACHINE_ARN`` is also set,
   trigger enrichment via Step Functions ``start_execution`` with input
-  ``json.dumps({"vcon": <doc>})`` -- the exact envelope the Spec 0 state machine
+  ``json.dumps({"vcon": <doc>})`` -- the exact envelope the enrichment state machine
   unwraps with ``event.get("vcon", event)``.
 * If ``BUCKET_NAME`` is NOT set, write the vCon JSON to a local file under a
   ``vcon-output/`` directory using the same run-key path layout, and skip
@@ -25,7 +25,7 @@ than fail-open, :func:`persist_vcon` makes a last-resort local write under
 or StartExecution error does not silently lose the entire vCon.
 
 Config is read from the environment (``BUCKET_NAME``, ``STATE_MACHINE_ARN``,
-``AWS_REGION``). These are OPTIONAL for Spec 1: the local-file fallback keeps the
+``AWS_REGION``). These are OPTIONAL: the local-file fallback keeps the
 agent demoable standalone.
 """
 
@@ -148,7 +148,7 @@ def persist_vcon(
         if state_machine_arn:
             if sfn_client is None:
                 sfn_client = _make_boto3_client("stepfunctions", region)
-            # Envelope must match the Spec 0 pipeline, which unwraps exactly once
+            # Envelope must match the enrichment pipeline, which unwraps exactly once
             # with event.get("vcon", event).
             response = sfn_client.start_execution(
                 stateMachineArn=state_machine_arn,

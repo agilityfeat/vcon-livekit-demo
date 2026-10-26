@@ -1,6 +1,6 @@
 """Unit tests for the pure conversation-item -> dialog-turn glue in agent.py.
 
-These tests exercise the FEAT-003 glue WITHOUT starting a real AgentSession,
+These tests exercise the conversation-item glue WITHOUT starting a real AgentSession,
 using credentials, or touching the network. Importing ``vcon_agent.agent`` pulls
 in the (installed) LiveKit SDK, which is fine; the key constraint is that we only
 call the pure :func:`handle_item` helper against an in-memory

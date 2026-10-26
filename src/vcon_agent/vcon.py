@@ -2,11 +2,11 @@
 
 This module builds an unsigned vCon document turn-by-turn as a call happens.
 It has NO LiveKit / Deepgram / ElevenLabs / AWS dependency on purpose, so the
-vCon-assembly logic is fully unit-testable with no live network. FEAT-003 wires
-the LiveKit callbacks into this core; the persistence layer flushes the finished
-document to S3 / a local file.
+vCon-assembly logic is fully unit-testable with no live network. The LiveKit
+entrypoint in ``agent.py`` wires the LiveKit callbacks into this core; the
+persistence layer flushes the finished document to S3 / a local file.
 
-Document shape (matches what the Spec 0 infrastructure template consumes):
+Document shape (matches what the AWS infrastructure template consumes):
 
     {
       "vcon": "0.0.1",
@@ -30,7 +30,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-# vCon spec version consumed by the Spec 0 pipeline.
+# vCon specification version consumed by the enrichment pipeline.
 VCON_VERSION = "0.0.1"
 
 # Fixed party indices. The whole model (dialog turns, consent attachment) refers
@@ -49,7 +49,7 @@ DEFAULT_CONSENT_SCRIPT = (
     "Do you consent to recording and processing of this conversation?"
 )
 
-# Map of LLM / transcript role strings to the fixed party index. FEAT-003 uses
+# Map of LLM / transcript role strings to the fixed party index. The agent uses
 # this to translate LiveKit ChatMessage roles ('user'/'assistant') into indices.
 _ROLE_TO_INDEX = {
     "user": PATIENT_INDEX,

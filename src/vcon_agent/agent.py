@@ -1,14 +1,14 @@
-"""LiveKit Agents entrypoint for the scripted patient-intake agent (Spec 1).
+"""LiveKit Agents entrypoint for the scripted patient-intake agent.
 
 This module is the only part of ``vcon_agent`` that depends on LiveKit. It wires
 the real-time voice leg (Deepgram STT + ElevenLabs TTS + an OpenAI LLM) onto the
-framework-independent core from FEAT-002:
+framework-independent core in ``vcon.py`` and ``persistence.py``:
 
 * :class:`~vcon_agent.vcon.VConBuilder` builds the unsigned vCon incrementally,
   turn-by-turn, *during* the call. Party index 0 is the patient, index 1 is the
   agent.
 * :func:`~vcon_agent.persistence.persist_vcon` flushes the finished document once
-  on session end -- a single PUT to S3 (under the Spec 0 unique-key-per-run
+  on session end -- a single PUT to S3 (under the unique-key-per-run
   prefix, then a guarded Step Functions StartExecution) when ``BUCKET_NAME`` is
   set, or a local-file fallback otherwise.
 
@@ -74,7 +74,7 @@ def handle_item(builder: VConBuilder, role: str, text: str) -> bool:
     """Translate one committed conversation item into a vCon dialog turn.
 
     This is the pure glue between LiveKit's ``conversation_item_added`` event and
-    the FEAT-002 vCon model. It has no LiveKit or network dependency so it can be
+    the vCon model in ``vcon.py``. It has no LiveKit or network dependency so it can be
     unit-tested directly by feeding a sequence of ``(role, text)`` items.
 
     ``role`` is mapped to a fixed party index via
@@ -122,7 +122,7 @@ async def entrypoint(ctx: JobContext) -> None:
     # lands in dialog[]; nothing wires that reply back into this boolean, and
     # there is no consent-denied/abort path. Binding the recorded boolean to the
     # patient's real response (and refusing to proceed on denial) is a Production
-    # concern per the spec's acknowledged consent shortcut.
+    # concern per the acknowledged consent shortcut.
     builder = VConBuilder()
     builder.add_consent(granted=True, script=DEFAULT_CONSENT_SCRIPT)
 
@@ -145,7 +145,7 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.exception("failed to record dialog turn (role=%r)", role)
 
     # Persist ONCE on session end: the single flush-to-S3 PUT (acknowledged
-    # shortcut), with the local-file fallback when the Spec 0 env is absent and a
+    # shortcut), with the local-file fallback when the AWS backend env is absent and a
     # guarded StartExecution when STATE_MACHINE_ARN is set.
     async def _flush_vcon() -> None:
         try:
