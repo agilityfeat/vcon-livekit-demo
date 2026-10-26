@@ -1,4 +1,4 @@
-"""Offline tests for the Spec 5 portability CLI (the "second tool").
+"""Offline tests for the portability CLI (the "second tool").
 
 These tests prove the portability claim the same way the CLI does: they load the
 bundled sample vCons through the independent ``vcon`` PyPI library and assert the

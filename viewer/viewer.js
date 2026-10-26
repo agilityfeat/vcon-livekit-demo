@@ -74,7 +74,7 @@ function firstDialogTurnIndex(entry) {
 
 /**
  * Decide whether a full doc and a redacted doc are the SAME vCon, linked via
- * the standard `redacted` field. The visible invariant from FEAT-001:
+ * the standard `redacted` field. The visible invariant:
  *   full.redacted.uuid === redacted.uuid
  * and, when present, the redacted doc's back-reference names the full uuid.
  * Returns a descriptive object so the UI can show WHY it matches (or not).

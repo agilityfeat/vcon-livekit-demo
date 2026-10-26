@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Portability demo: the Spec 5 "second tool" that reads a vCon via the library.
+"""Portability demo: the "second tool" that reads a vCon via the library.
 
-The payoff of Spec 5 is portability: once a call is captured as a standard vCon,
+The payoff is portability: once a call is captured as a standard vCon,
 you can drop it into ANY vCon-aware tool and it just works. This tiny CLI is that
 second tool. It does NOT use any repo code to parse the record; instead it loads
 the vCon with the independent ``vcon`` PyPI library (``from vcon import Vcon``)
@@ -14,7 +14,7 @@ just readable by the tool that wrote it.
 Why read THROUGH the library (not ``json.load``): anyone can re-parse their own
 JSON. The point here is that a tool that has never seen this repo, written by a
 different author, maps our bytes onto the vCon data model and surfaces the same
-fields. That is the portability claim demo.md section 7 asks us to prove.
+fields. That is the portability claim this demo sets out to prove.
 
 🩹 Shortcut: this portability demo is a CLI READ, not a full Conserver
 deployment, and it REPORTS but does NOT enforce the library's strict

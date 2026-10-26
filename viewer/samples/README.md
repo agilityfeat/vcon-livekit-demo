@@ -1,11 +1,11 @@
-# Sample vCon fixtures (Spec 5 viewer + portability CLI)
+# Sample vCon fixtures (viewer + portability CLI)
 
 Static, offline sample data the viewer and the portability CLI load directly
 from disk. No build step, no network, no AWS.
 
 ## Files
 
-- `vcon-full.sample.json` — a realistic FULL enriched vCon in the Spec 0/3 shape
+- `vcon-full.sample.json` — a realistic FULL enriched vCon in the enriched shape
   (`vcon` 0.0.1, `uuid`, `subject`, `created_at`, `parties` [patient, agent],
   `dialog`, `analysis`, `attachments`). It carries the standard `redacted`
   forward link pointing at the redacted sibling.

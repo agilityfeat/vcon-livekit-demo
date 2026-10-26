@@ -1,4 +1,4 @@
-"""Unit tests for the pure Spec 3 enrichment shaping/provenance helpers.
+"""Unit tests for the pure enrichment shaping/provenance helpers.
 
 Fully offline: no boto3 client and no network. Every helper is fed a canned
 AWS-shaped dict so the logic the inline Lambdas mirror is exercised here. These

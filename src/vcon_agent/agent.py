@@ -1,14 +1,14 @@
-"""LiveKit Agents entrypoint for the scripted patient-intake agent (Spec 1).
+"""LiveKit Agents entrypoint for the scripted patient-intake agent.
 
 This module is the only part of ``vcon_agent`` that depends on LiveKit. It wires
 the real-time voice leg (Deepgram STT + ElevenLabs TTS + an OpenAI LLM) onto the
-framework-independent core from FEAT-002:
+framework-independent vCon core:
 
 * :class:`~vcon_agent.vcon.VConBuilder` builds the unsigned vCon incrementally,
   turn-by-turn, *during* the call. Party index 0 is the patient, index 1 is the
   agent.
 * :func:`~vcon_agent.persistence.persist_vcon` flushes the finished document once
-  on session end -- a single PUT to S3 (under the Spec 0 unique-key-per-run
+  on session end -- a single PUT to S3 (under the unique-key-per-run
   prefix, then a guarded Step Functions StartExecution) when ``BUCKET_NAME`` is
   set, or a local-file fallback otherwise.
 
@@ -86,7 +86,7 @@ def handle_item(builder: VConBuilder, role: str, text: str) -> bool:
     """Translate one committed conversation item into a vCon dialog turn.
 
     This is the pure glue between LiveKit's ``conversation_item_added`` event and
-    the FEAT-002 vCon model. It has no LiveKit or network dependency so it can be
+    the framework-independent vCon model. It has no LiveKit or network dependency so it can be
     unit-tested directly by feeding a sequence of ``(role, text)`` items.
 
     ``role`` is mapped to a fixed party index via
@@ -168,7 +168,7 @@ async def _default_start_egress(
     Kept behind the injectable ``start_egress`` seam in :func:`entrypoint` so
     unit tests pass a fake and never open a connection. This live path (real
     LiveKit/AWS) is NOT automatically verifiable in the sandbox, the same stance
-    Spec 1 took for the live voice path.
+    the intake agent takes for the live voice path.
     """
     client = api.LiveKitAPI(url, api_key, api_secret)
     try:
@@ -250,8 +250,9 @@ async def _maybe_start_recording_egress(
         )
     except Exception:  # defensive: never break the call on an egress error
         logger.exception("failed to start recording egress; continuing call")
-        # Still record the intended recording location on the vCon so Spec 3's
-        # S3 poll has a key to look for even if the start call hiccuped.
+        # Still record the intended recording location on the vCon so the
+        # enrichment pipeline's S3 poll has a key to look for even if the start
+        # call hiccuped.
 
     # Thread the recording location into the vCon as an external reference.
     builder.add_recording_dialog(url)
@@ -311,7 +312,7 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.exception("failed to record dialog turn (role=%r)", role)
 
     # Persist ONCE on session end: the single flush-to-S3 PUT (acknowledged
-    # shortcut), with the local-file fallback when the Spec 0 env is absent and a
+    # shortcut), with the local-file fallback when the AWS env is absent and a
     # guarded StartExecution when STATE_MACHINE_ARN is set.
     async def _flush_vcon() -> None:
         try:
@@ -350,7 +351,8 @@ async def entrypoint(ctx: JobContext) -> None:
     # it never breaks the call.
     #
     # NOT on the critical path: we deliberately do NOT drive processing from an
-    # ``egress_ended`` webhook/event. Spec 3 polls S3 at the recording key for
+    # ``egress_ended`` webhook/event. The enrichment pipeline polls S3 at the
+    # recording key for
     # readiness instead, which sidesteps the duplicate / early / missing-webhook
     # failure modes. A real deployment MAY still subscribe to egress status for
     # logging/observability only, but that is never the trigger for enrichment.

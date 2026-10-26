@@ -1,6 +1,6 @@
-# Viewer + portability (Spec 5) — the payoff
+# Viewer + portability — the payoff
 
-Spec 5 makes the benefits of capturing a call as a standard [vCon](https://vcon.dev/)
+The viewer makes the benefits of capturing a call as a standard [vCon](https://vcon.dev/)
 **visible**: one record, provenance you can click, two linked views (full and
 redacted), and portability to a second, independent tool.
 
@@ -15,7 +15,7 @@ It ships two pieces, both fully local and offline:
 > parent of this `viewer/` folder), which is why paths are prefixed with
 > `viewer/`.
 
-## What it delivers (demo.md section 7 success criteria)
+## What it delivers
 
 1. **One object.** A single vCon carries the parties, the dialog, the recording
    reference, and every analysis (transcript, entities, summary) with provenance.
@@ -60,7 +60,7 @@ payoff:
 > → that dialog turn's numeric `start` / `duration` → **seek the audio element**
 > to that moment (and highlight the originating turn).
 
-That chain is exactly the turn-index provenance the Spec 3 pipeline wrote into
+That chain is exactly the turn-index provenance the enrichment pipeline wrote into
 `analysis[]`, read straight off the record with no extra bookkeeping.
 
 > ⚠️ The seek depends on a **numeric** dialog `start` (seconds). The bundled

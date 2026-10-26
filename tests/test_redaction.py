@@ -1,4 +1,4 @@
-"""Unit tests for the pure Spec 5 redaction + full↔redacted linking helpers.
+"""Unit tests for the pure redaction + full↔redacted linking helpers.
 
 Fully offline: canned dict inputs, no boto3 and no network (mirrors the
 tests/test_enrichment.py style). These tests are meaningful: they fail if the
@@ -25,7 +25,7 @@ _SAMPLES_DIR = os.path.join(
 
 
 def _full_doc():
-    """A canned FULL enriched vCon in the Spec 0/3 shape (numeric timing)."""
+    """A canned FULL enriched vCon in the enriched shape (numeric timing)."""
     return {
         "vcon": "0.0.1",
         "uuid": "full-uuid-0001",

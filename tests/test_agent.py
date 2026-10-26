@@ -1,6 +1,6 @@
 """Unit tests for the pure conversation-item -> dialog-turn glue in agent.py.
 
-These tests exercise the FEAT-003 glue WITHOUT starting a real AgentSession,
+These tests exercise the conversation-item -> dialog-turn glue WITHOUT starting a real AgentSession,
 using credentials, or touching the network. Importing ``vcon_agent.agent`` pulls
 in the (installed) LiveKit SDK, which is fine; the key constraint is that we only
 call the pure :func:`handle_item` helper against an in-memory
@@ -98,7 +98,7 @@ def test_role_is_case_and_whitespace_tolerant():
     assert [turn["party"] for turn in dialog] == [PATIENT_INDEX, AGENT_INDEX]
 
 
-# --- Recording egress seam (FEAT-001), fully offline via injected fakes ------
+# --- Recording egress seam, fully offline via injected fakes ------
 
 
 class _FakeFileInfo:
@@ -292,6 +292,6 @@ def test_egress_failure_still_records_intended_url_and_never_raises():
         "room-abc", "2024-01-01T00:00:00+00:00", timestamp="1700000000"
     )
     expected_url = f"s3://my-bucket/{expected_key}"
-    # Even on failure, Spec 3's S3 poll has a key to look for.
+    # Even on failure, the enrichment pipeline's S3 poll has a key to look for.
     assert url == expected_url
     assert builder.to_dict()["dialog"][0]["url"] == expected_url

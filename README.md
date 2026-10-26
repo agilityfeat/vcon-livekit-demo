@@ -26,7 +26,7 @@ one-command deploy, mapping stack Outputs into a local `.env` (copied from
 `.env.example`), the manual Bedrock model-access prerequisite, and local
 validation, see **[infrastructure/README.md](infrastructure/README.md)**.
 
-## Intake agent (Spec 1)
+## Intake agent
 
 The intake agent is a [LiveKit Agents](https://docs.livekit.io/agents/) worker
 (`src/vcon_agent/agent.py`) that joins a room and runs a short, scripted patient
@@ -63,7 +63,7 @@ document **incrementally, turn by turn**, using the framework-independent core i
 When the session ends, the agent flushes the finished vCon **exactly once**
 (`src/vcon_agent/persistence.py`):
 
-- If `BUCKET_NAME` is set, it PUTs the vCon JSON to S3 under the Spec 0
+- If `BUCKET_NAME` is set, it PUTs the vCon JSON to S3 under the
   unique-key-per-run convention
   `<room_name>/<session_start_iso>/<timestamp>/vcon-skeleton.json`, then (only if
   `STATE_MACHINE_ARN` is also set) triggers enrichment via a guarded Step
@@ -92,7 +92,7 @@ The `.env` file configures the LiveKit connection
 (`LIVEKIT_URL`/`LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET`), the provider keys
 (`DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `OPENAI_API_KEY`), and the optional
 AWS backend (`BUCKET_NAME`, `STATE_MACHINE_ARN`, `AWS_REGION`). The AWS variables
-are optional for Spec 1; leave them blank to use the local-file fallback.
+are optional; leave them blank to use the local-file fallback.
 
 ### Run the agent (live)
 
@@ -149,16 +149,16 @@ python3 -m pytest tests/ -q
   and removes the current failure mode where the PUT succeeds but the subsequent
   `StartExecution` fails, so enrichment silently never fires.
 
-Out of scope for Spec 1: authentication/authorization, multi-party calls, and any
+Out of scope: authentication/authorization, multi-party calls, and any
 EHR integration.
 
-## Call recording (Spec 2)
+## Call recording
 
-Spec 2 captures the **call audio** to S3 and surfaces its location on the vCon so
-the enrichment pipeline (Spec 3) can find and transcribe it. When the agent
+The recording path captures the **call audio** to S3 and surfaces its location on the vCon so
+the enrichment pipeline can find and transcribe it. When the agent
 joins a room (right after `ctx.connect()`), it starts a LiveKit
 **room-composite, audio-only egress** that writes an OGG recording directly to
-the Spec 0 S3 bucket.
+the S3 bucket.
 
 ### Where the recording lands
 
@@ -175,7 +175,7 @@ recording key and the vCon flush, so `recording_key(...)` and `run_key(...)`
 always resolve to the same run prefix. This layout matches the S3
 unique-key-per-run convention documented in
 **[infrastructure/README.md](infrastructure/README.md)**; the unique key plus
-Spec 0 bucket **versioning** together neutralize the "a later egress overwrites
+the bucket **versioning** together neutralize the "a later egress overwrites
 the earlier file" failure mode.
 
 ### Recording location on the vCon
@@ -193,23 +193,23 @@ location.
 ### Readiness is decoupled from egress webhooks
 
 Rather than relying on the LiveKit `egress_ended` webhook to drive downstream
-processing, readiness is **poll-based**: Spec 3 polls S3 for the object at the
+processing, readiness is **poll-based**: the enrichment pipeline polls S3 for the object at the
 known recording key. This sidesteps the duplicate / early / missing-webhook
 failure modes. The agent may subscribe to `egress_ended` for
 logging/observability only; it is explicitly **not on the critical path** and
 triggers no processing.
 
-### Env-optional, same as Spec 1
+### Env-optional
 
 Live egress needs `BUCKET_NAME` + `AWS_REGION` **and** the LiveKit credentials
 (`LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET`). When `BUCKET_NAME` or
 the LiveKit creds are absent, the agent **skips egress gracefully** (logged, the
 call is never broken) so the standalone local demo still runs, mirroring the
-env-optional behavior of the Spec 1 persistence layer. `AWS_ACCESS_KEY_ID` /
+env-optional behavior of the persistence layer. `AWS_ACCESS_KEY_ID` /
 `AWS_SECRET_ACCESS_KEY` are used for the S3 upload credentials if present and
 otherwise fall back to the instance role.
 
-Like Spec 1's live voice path, the **live egress path is not part of automated
+Like the live voice path, the **live egress path is not part of automated
 verification**: it needs real LiveKit and AWS credentials and cannot be
 exercised offline. The egress call sits behind an injectable/mockable seam, so
 the recording-key helper, the recording dialog object, and the egress-request
@@ -218,18 +218,18 @@ builder are all unit-tested offline with fakes (no live LiveKit/AWS).
 ### Acknowledged shortcuts (demo) vs. production
 
 - 🩹 **Plain SSE-S3, no customer-managed KMS key** for the recordings. →
-  *Production:* SSE-KMS with a CMK, bucket policy, and VPC endpoints. (Spec 4
-  still demonstrates JWE on the vCon itself.)
-- 🩹 **Poll-based readiness** (Spec 3 polls S3 at the recording key with a simple
+  *Production:* SSE-KMS with a CMK, bucket policy, and VPC endpoints. (The
+  vCon signing path still demonstrates JWE on the vCon itself.)
+- 🩹 **Poll-based readiness** (the enrichment pipeline polls S3 at the recording key with a simple
   timeout/retry). → *Production:* event-driven readiness with proper dedupe on
   `egressId`, reconciliation for missing events, and handling of early/truncated
   egress.
 - 🩹 **Audio only, no video** egress. → *Production:* configurable, with video
   egress if the clinical workflow needs it.
 
-## Enrichment pipeline (Spec 3)
+## Enrichment pipeline
 
-Spec 3 runs the **AI enrichment** after the call and writes the results into the
+The enrichment pipeline runs the **AI enrichment** after the call and writes the results into the
 vCon `analysis[]` with **turn-level provenance**. The backend is a Step Functions
 state machine (`infrastructure/template.yaml`) whose steps mirror the pure,
 offline-tested logic in `src/vcon_agent/enrichment.py` and
@@ -326,9 +326,9 @@ inline Lambda body. The live end-to-end check is
   visible alarm state plus retries, so operators are paged rather than reading a
   silently empty result.
 
-## Viewer + portability (Spec 5)
+## Viewer + portability
 
-Spec 5 is the payoff: it makes the benefits of the single vCon **visible**. A
+The viewer is the payoff: it makes the benefits of the single vCon **visible**. A
 minimal static web viewer renders parties / dialog / analysis and lets a
 physician click an extracted medication to jump the audio to the exact moment it
 was mentioned (turn-index provenance); an analyst view shows the de-identified

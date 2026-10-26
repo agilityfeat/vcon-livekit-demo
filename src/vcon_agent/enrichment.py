@@ -1,4 +1,4 @@
-"""Pure, boto3-free shaping and provenance helpers for the Spec 3 pipeline.
+"""Pure, boto3-free shaping and provenance helpers for the enrichment pipeline.
 
 This module is the AUTHORITATIVE, unit-tested copy of the correctness-critical
 logic each enrichment step runs: mapping medical-transcript segments back to
@@ -9,7 +9,7 @@ summary prompt, and pulling the summary text out of a Bedrock response.
 
 Why a separate pure module? The real pipeline runs as inline-code Lambdas inside
 the CloudFormation template (``Code.ZipFile``), which CANNOT import this repo
-package at AWS runtime. FEAT-003 therefore MIRRORS this logic into those inline
+package at AWS runtime. The AWS enrichment glue therefore MIRRORS this logic into those inline
 Lambda bodies. Keeping the logic here as pure functions means it is exercised by
 the offline pytest suite (with canned AWS-shaped inputs, no live calls), and the
 inline copies stay small and checkable with py_compile. This mirror/pure-core

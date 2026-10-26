@@ -1,9 +1,9 @@
-"""Pure, boto3-free redaction + full↔redacted linking for the Spec 5 viewer.
+"""Pure, boto3-free redaction + full↔redacted linking for the viewer.
 
-Spec 3 stops after the Bedrock summary: the merged vCon has NO redaction step
-and NO ``redacted`` link (the infrastructure README mentions a vcon-redacted.json
-key but nothing ever emits it). Spec 5 needs a REAL full+redacted pair so the
-viewer can show the analyst the de-identified record and prove it is the SAME
+The enrichment pipeline stops after the Bedrock summary: the merged vCon has NO
+redaction step and NO ``redacted`` link (the infrastructure README mentions a
+vcon-redacted.json key but nothing ever emits it). The viewer needs a REAL
+full+redacted pair so it can show the analyst the de-identified record and prove it is the SAME
 vCon, linked via the standard ``redacted`` property. This module introduces both
 pieces as pure, unit-tested helpers, mirroring the framework-independent core
 convention already used in :mod:`vcon_agent.vcon` and
@@ -26,7 +26,7 @@ What redaction does (and, deliberately, does NOT) touch:
     needs; dropping them would defeat the point of the redacted view.
 
 🩹 Shortcut: demo-grade, field-level masking driven by a fixed field list and a
-single ``[REDACTED]`` marker, applied to the known Spec 0/3 vCon shape.
+single ``[REDACTED]`` marker, applied to the known enriched vCon shape.
 → Production: a vetted de-identification service (e.g. Comprehend Medical
 ``DetectPHI``-driven redaction) with a configurable policy, so PHI embedded in
 otherwise-clinical text is found and removed rather than relying on masking a

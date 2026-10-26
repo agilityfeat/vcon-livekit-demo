@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vcon-livekit-demo-agent"
 version = "0.1.0"
-description = "LiveKit voice intake agent that assembles an unsigned vCon skeleton (Spec 1)."
+description = "LiveKit voice intake agent that assembles an unsigned vCon skeleton."
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
