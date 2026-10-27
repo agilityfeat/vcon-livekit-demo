@@ -185,15 +185,12 @@ def test_egress_seam_threads_recording_url_into_vcon():
             builder,
             "room-abc",
             "2024-01-01T00:00:00+00:00",
-            "1700000000",
             env=_LIVE_ENV,
             start_egress=fake,
         )
     )
 
-    expected_key = recording_key(
-        "room-abc", "2024-01-01T00:00:00+00:00", timestamp="1700000000"
-    )
+    expected_key = recording_key("room-abc", "2024-01-01T00:00:00+00:00")
     expected_url = f"s3://my-bucket/{expected_key}"
     assert url == expected_url
 
@@ -212,11 +209,18 @@ def test_egress_seam_threads_recording_url_into_vcon():
     assert "body" not in dialog[0]
 
 
-def test_egress_seam_prefers_reported_location():
+def test_egress_always_uses_derived_s3_url_not_reported_location():
+    # Regression guard: even when the egress result reports a resolved https
+    # location, the vCon must still carry the canonical derived s3:// url. The
+    # enrichment pipeline runs server-side with AWS creds and polls S3 at the
+    # per-run key, so the s3:// URI is the single source of truth.
     builder = VConBuilder()
-    reported = "s3://my-bucket/room-abc/2024-01-01T00:00:00+00:00/1700000000/recording.ogg"
+    reported_https = (
+        "https://my-bucket.s3.amazonaws.com/"
+        "room-abc/2024-01-01T00:00:00+00:00/recording.ogg"
+    )
     fake = _FakeEgress(
-        info=_FakeEgressInfo(file_results=[_FakeFileInfo(reported)])
+        info=_FakeEgressInfo(file_results=[_FakeFileInfo(reported_https)])
     )
 
     url = asyncio.run(
@@ -224,13 +228,17 @@ def test_egress_seam_prefers_reported_location():
             builder,
             "room-abc",
             "2024-01-01T00:00:00+00:00",
-            "1700000000",
             env=_LIVE_ENV,
             start_egress=fake,
         )
     )
-    assert url == reported
-    assert builder.to_dict()["dialog"][0]["url"] == reported
+
+    expected_key = recording_key("room-abc", "2024-01-01T00:00:00+00:00")
+    expected_url = f"s3://my-bucket/{expected_key}"
+    # The derived s3:// url wins over the egress-reported https location.
+    assert url == expected_url
+    assert url != reported_https
+    assert builder.to_dict()["dialog"][0]["url"] == expected_url
 
 
 def test_egress_skipped_when_bucket_absent():
@@ -244,7 +252,6 @@ def test_egress_skipped_when_bucket_absent():
             builder,
             "room-abc",
             "2024-01-01T00:00:00+00:00",
-            "1700000000",
             env=env,
             start_egress=fake,
         )
@@ -267,7 +274,6 @@ def test_egress_skipped_when_livekit_creds_absent():
             builder,
             "room-abc",
             "2024-01-01T00:00:00+00:00",
-            "1700000000",
             env=env,
             start_egress=fake,
         )
@@ -290,15 +296,12 @@ def test_egress_failure_still_records_intended_url_and_never_raises():
             builder,
             "room-abc",
             "2024-01-01T00:00:00+00:00",
-            "1700000000",
             env=_LIVE_ENV,
             start_egress=_boom,
         )
     )
 
-    expected_key = recording_key(
-        "room-abc", "2024-01-01T00:00:00+00:00", timestamp="1700000000"
-    )
+    expected_key = recording_key("room-abc", "2024-01-01T00:00:00+00:00")
     expected_url = f"s3://my-bucket/{expected_key}"
     # Even on failure, the enrichment pipeline's S3 poll has a key to look for.
     assert url == expected_url

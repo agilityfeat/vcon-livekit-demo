@@ -56,7 +56,6 @@ def test_s3_put_and_start_execution_with_injected_fakes():
         doc,
         room_name="room-xyz",
         session_start_iso="2024-01-01T00:00:00+00:00",
-        timestamp="1700000000",
         env=env,
         s3_client=s3,
         sfn_client=sfn,
@@ -67,7 +66,7 @@ def test_s3_put_and_start_execution_with_injected_fakes():
     call = s3.put_object_calls[0]
     assert call["Bucket"] == "my-bucket"
     assert call["Key"] == (
-        "room-xyz/2024-01-01T00:00:00+00:00/1700000000/vcon-skeleton.json"
+        "room-xyz/2024-01-01T00:00:00+00:00/vcon-skeleton.json"
     )
     assert call["ContentType"] == "application/json"
     # Body round-trips back to the vCon doc.
@@ -83,7 +82,7 @@ def test_s3_put_and_start_execution_with_injected_fakes():
     # Result reflects the S3 destination and triggered enrichment.
     assert result.destination == "s3"
     assert result.location == (
-        "s3://my-bucket/room-xyz/2024-01-01T00:00:00+00:00/1700000000/"
+        "s3://my-bucket/room-xyz/2024-01-01T00:00:00+00:00/"
         "vcon-skeleton.json"
     )
     assert result.enrichment_triggered is True
@@ -102,7 +101,6 @@ def test_s3_without_state_machine_skips_enrichment():
         doc,
         room_name="room-xyz",
         session_start_iso="2024-01-01T00:00:00+00:00",
-        timestamp="1700000000",
         env=env,
         s3_client=s3,
         sfn_client=sfn,
@@ -125,7 +123,6 @@ def test_local_file_fallback_when_bucket_unset(tmp_path):
         doc,
         room_name="room-xyz",
         session_start_iso="2024-01-01T00:00:00+00:00",
-        timestamp="1700000000",
         env=env,
         s3_client=s3,
         sfn_client=sfn,
@@ -136,7 +133,6 @@ def test_local_file_fallback_when_bucket_unset(tmp_path):
         tmp_path
         / "room-xyz"
         / "2024-01-01T00:00:00+00:00"
-        / "1700000000"
         / "vcon-skeleton.json"
     )
     assert expected_path.is_file()
@@ -149,7 +145,7 @@ def test_local_file_fallback_when_bucket_unset(tmp_path):
     assert result.location == str(expected_path)
     assert result.enrichment_triggered is False
     assert result.key == (
-        "room-xyz/2024-01-01T00:00:00+00:00/1700000000/vcon-skeleton.json"
+        "room-xyz/2024-01-01T00:00:00+00:00/vcon-skeleton.json"
     )
 
 
@@ -185,7 +181,6 @@ def test_s3_put_failure_salvages_to_local(tmp_path):
         doc,
         room_name="room-xyz",
         session_start_iso="2024-01-01T00:00:00+00:00",
-        timestamp="1700000000",
         env=env,
         s3_client=s3,
         local_output_dir=str(tmp_path),
@@ -199,7 +194,6 @@ def test_s3_put_failure_salvages_to_local(tmp_path):
         tmp_path
         / "room-xyz"
         / "2024-01-01T00:00:00+00:00"
-        / "1700000000"
         / "vcon-skeleton.json"
     )
     assert expected_path.is_file()
@@ -210,7 +204,7 @@ def test_s3_put_failure_salvages_to_local(tmp_path):
     assert result.enrichment_triggered is False
     assert result.s3_fallback_to_local is True
     assert result.key == (
-        "room-xyz/2024-01-01T00:00:00+00:00/1700000000/vcon-skeleton.json"
+        "room-xyz/2024-01-01T00:00:00+00:00/vcon-skeleton.json"
     )
 
 
@@ -229,7 +223,6 @@ def test_start_execution_failure_salvages_to_local(tmp_path):
         doc,
         room_name="room-xyz",
         session_start_iso="2024-01-01T00:00:00+00:00",
-        timestamp="1700000000",
         env=env,
         s3_client=s3,
         sfn_client=sfn,
@@ -244,7 +237,6 @@ def test_start_execution_failure_salvages_to_local(tmp_path):
         tmp_path
         / "room-xyz"
         / "2024-01-01T00:00:00+00:00"
-        / "1700000000"
         / "vcon-skeleton.json"
     )
     assert expected_path.is_file()
@@ -264,7 +256,6 @@ def test_local_fallback_via_monkeypatched_cwd(tmp_path, monkeypatch):
         doc,
         room_name="room-xyz",
         session_start_iso="2024-01-01T00:00:00+00:00",
-        timestamp="1700000000",
         env={},
     )
 
@@ -273,7 +264,6 @@ def test_local_fallback_via_monkeypatched_cwd(tmp_path, monkeypatch):
         / "vcon-output"
         / "room-xyz"
         / "2024-01-01T00:00:00+00:00"
-        / "1700000000"
         / "vcon-skeleton.json"
     )
     assert expected_path.is_file()

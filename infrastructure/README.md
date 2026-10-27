@@ -96,18 +96,19 @@ cp .env.example .env
 ## S3 unique-key-per-run convention
 
 To avoid collisions and accidental overwrites, every run writes objects under a
-**unique key prefix** built from the room name, the session start, and a
-timestamp:
+**unique key prefix** built from the room name and the session start (a
+microsecond-precision UTC instant):
 
 ```
-<room_name>/<session_start_iso>/<timestamp>/recording.ogg
-<room_name>/<session_start_iso>/<timestamp>/vcon-skeleton.json
-<room_name>/<session_start_iso>/<timestamp>/vcon-enriched.json
-<room_name>/<session_start_iso>/<timestamp>/vcon-redacted.json
+<room_name>/<session_start_iso>/recording.ogg
+<room_name>/<session_start_iso>/vcon-skeleton.json
+<room_name>/<session_start_iso>/vcon-enriched.json
+<room_name>/<session_start_iso>/vcon-redacted.json
 ```
 
-Bucket **versioning** is enabled as cheap insurance in case a key is ever
-reused.
+`session_start_iso` is a microsecond-precision UTC instant captured once per
+run, so it uniquely identifies the run as a single key segment. Bucket
+**versioning** is enabled as cheap insurance in case a key is ever reused.
 
 ## Run the pipeline (trivial `StartExecution`)
 

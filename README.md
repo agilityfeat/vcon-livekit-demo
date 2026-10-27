@@ -65,7 +65,7 @@ When the session ends, the agent flushes the finished vCon **exactly once**
 
 - If `BUCKET_NAME` is set, it PUTs the vCon JSON to the AWS enrichment backend's
   S3 bucket under the unique-key-per-run convention
-  `<room_name>/<session_start_iso>/<timestamp>/vcon-skeleton.json`, then (only if
+  `<room_name>/<session_start_iso>/vcon-skeleton.json`, then (only if
   `STATE_MACHINE_ARN` is also set) triggers enrichment via a guarded Step
   Functions `StartExecution` with input `{"vcon": <doc>}`.
 - If `BUCKET_NAME` is unset, it writes the same document to a local file under
@@ -193,17 +193,25 @@ The egress writes to the **same unique run prefix** the vCon flush uses, so the
 recording and the skeleton vCon sit side by side:
 
 ```
-<room_name>/<session_start_iso>/<timestamp>/recording.ogg
-<room_name>/<session_start_iso>/<timestamp>/vcon-skeleton.json
+<room_name>/<session_start_iso>/recording.ogg
+<room_name>/<session_start_iso>/vcon-skeleton.json
 ```
 
-The agent computes **one** `timestamp` per run and shares it between the
+The per-run key has a **single time segment**: `session_start_iso` is a
+microsecond-precision UTC instant captured once at entry and shared between the
 recording key and the vCon flush, so `recording_key(...)` and `run_key(...)`
 always resolve to the same run prefix. This layout matches the S3
 unique-key-per-run convention documented in
 **[infrastructure/README.md](infrastructure/README.md)**; the unique key plus
 the bucket's **versioning** together neutralize the "a later egress overwrites
 the earlier file" failure mode.
+
+LiveKit Egress also writes a sibling `EG_<id>.json` **manifest** object next to
+`recording.ogg`. This is **intentionally retained** for provenance: it carries
+the egress id, the started_at/ended_at timings, and the resolved object
+location. The enrichment pipeline keys off `recording.ogg` and can ignore the
+manifest; set `disable_manifest=True` on the egress `FileOutput` if you prefer a
+bucket that holds only `recording.ogg`.
 
 ### Recording location on the vCon
 

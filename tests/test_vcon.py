@@ -138,44 +138,32 @@ def test_add_dialog_turn_by_role():
 
 
 def test_run_key_layout_exact():
-    key = run_key("room-abc", "2024-01-01T00:00:00+00:00", timestamp="1700000000")
-    assert key == "room-abc/2024-01-01T00:00:00+00:00/1700000000/vcon-skeleton.json"
-
-
-def test_run_key_defaults_timestamp():
     key = run_key("room-abc", "2024-01-01T00:00:00+00:00")
-    assert key.startswith("room-abc/2024-01-01T00:00:00+00:00/")
-    assert key.endswith("/vcon-skeleton.json")
+    assert key == "room-abc/2024-01-01T00:00:00+00:00/vcon-skeleton.json"
 
 
 def test_recording_key_layout_exact():
-    key = recording_key("room-abc", "2024-01-01T00:00:00+00:00", timestamp="1700000000")
-    assert key == "room-abc/2024-01-01T00:00:00+00:00/1700000000/recording.ogg"
-
-
-def test_recording_key_defaults_timestamp():
     key = recording_key("room-abc", "2024-01-01T00:00:00+00:00")
-    assert key.startswith("room-abc/2024-01-01T00:00:00+00:00/")
-    assert key.endswith("/recording.ogg")
+    assert key == "room-abc/2024-01-01T00:00:00+00:00/recording.ogg"
 
 
 def test_recording_key_and_run_key_share_run_prefix():
-    # Given the SAME (room, session_start, timestamp) triple, recording.ogg and
-    # vcon-skeleton.json must live under the identical run prefix.
+    # Given the SAME (room, session_start) pair, recording.ogg and
+    # vcon-skeleton.json must live under the identical single-segment run prefix.
     room = "room-abc"
     session_start = "2024-01-01T00:00:00+00:00"
-    ts = "1700000000"
-    rec = recording_key(room, session_start, timestamp=ts)
-    vcon = run_key(room, session_start, timestamp=ts)
+    rec = recording_key(room, session_start)
+    vcon = run_key(room, session_start)
 
     assert rec.rsplit("/", 1)[0] == vcon.rsplit("/", 1)[0]
+    assert rec.rsplit("/", 1)[0] == f"{room}/{session_start}"
     assert rec.endswith("/recording.ogg")
     assert vcon.endswith("/vcon-skeleton.json")
 
 
 def test_add_recording_dialog_external_reference_no_inline_bytes():
     builder = VConBuilder()
-    url = "s3://my-bucket/room-abc/2024-01-01T00:00:00+00:00/1700000000/recording.ogg"
+    url = "s3://my-bucket/room-abc/2024-01-01T00:00:00+00:00/recording.ogg"
     entry = builder.add_recording_dialog(url)
 
     doc = builder.to_dict()

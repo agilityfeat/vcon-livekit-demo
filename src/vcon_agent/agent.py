@@ -174,6 +174,15 @@ def build_egress_request(
     tests can assert the request shape (audio-only, OGG, filepath, bucket/region)
     without touching LiveKit.
 
+    Egress manifest: we intentionally leave ``FileOutput.disable_manifest`` at
+    its default (not set), so LiveKit Egress writes a sibling ``EG_<id>.json``
+    manifest next to ``recording.ogg``. That manifest is useful provenance -- it
+    carries the egress_id, started_at/ended_at timings, and the resolved
+    (https) object location -- so it is a deliberate keep, not an accident. Set
+    ``disable_manifest=True`` on the FileOutput if a cleaner bucket (only
+    recording.ogg) is preferred; the enrichment pipeline keys off recording.ogg
+    and can ignore the manifest either way.
+
     SHORTCUT (acknowledged): audio only (no video) and plain SSE-S3 via the
     S3Upload credentials (no CMK). Production would make audio/video configurable
     per clinical workflow and use SSE-KMS with a customer-managed key.
@@ -186,6 +195,9 @@ def build_egress_request(
                 file=api.FileOutput(
                     file_type=api.EncodedFileType.OGG,
                     filepath=filepath,
+                    # disable_manifest left at its default (False) so the
+                    # EG_<id>.json provenance manifest is written alongside
+                    # recording.ogg. See the docstring for how to disable it.
                 ),
                 storage=api.StorageConfig(
                     s3=api.S3Upload(
@@ -203,10 +215,11 @@ def build_egress_request(
 def recording_url(bucket: str, key: str) -> str:
     """Return the canonical ``s3://<bucket>/<key>`` url for the recording object.
 
-    Used to thread the recording location into the vCon's recording dialog. When
-    an :class:`api.EgressInfo` result is available its ``file_results[].location``
-    can be preferred, but the derived ``s3://`` url is always well defined from
-    the bucket and the per-run recording key.
+    This is the single source of the ``s3://`` form threaded into the vCon's
+    recording dialog. The vCon always carries this derived url (well defined from
+    the bucket and the per-run recording key): the enrichment pipeline runs
+    server-side with AWS SDK credentials, for which the ``s3://`` URI is the
+    natural identifier.
     """
     return f"s3://{bucket}/{key}"
 
@@ -237,7 +250,6 @@ async def _maybe_start_recording_egress(
     builder: VConBuilder,
     room_name: str,
     session_start_iso: str,
-    timestamp: str,
     *,
     env: Optional[dict] = None,
     start_egress: Optional[
@@ -251,9 +263,15 @@ async def _maybe_start_recording_egress(
     standalone local demo still runs -- mirroring persistence.py's env-optional
     behavior. The whole live call is guarded so a failure never breaks the call.
 
-    The recording key is derived from the SAME ``(room_name, session_start_iso,
-    timestamp)`` triple used for the vCon flush, so ``recording.ogg`` and
-    ``vcon-skeleton.json`` share the run prefix. Returns the recording ``s3://``
+    The recording key is derived from the SAME ``(room_name, session_start_iso)``
+    pair used for the vCon flush, so ``recording.ogg`` and ``vcon-skeleton.json``
+    share the single-segment run prefix.
+
+    The vCon ALWAYS carries the canonical ``s3://<bucket>/<key>`` location
+    derived from the per-run recording key (via :func:`recording_url`). The
+    egress result is used ONLY for logging (``egress_id``); readiness is
+    poll-based (the enrichment pipeline polls S3 at that key), so we do not wait
+    for or prefer any egress-reported location. Returns the recording ``s3://``
     url when a recording dialog was added, else ``None``.
 
     ``start_egress`` is an injectable async callable (defaults to the live
@@ -278,7 +296,10 @@ async def _maybe_start_recording_egress(
         )
         return None
 
-    key = recording_key(room_name, session_start_iso, timestamp=timestamp)
+    # The vCon always carries the canonical s3:// url derived from the per-run
+    # recording key. The egress result is used only for logging (egress_id); the
+    # pipeline finds the object by polling S3 at this key.
+    key = recording_key(room_name, session_start_iso)
     url = recording_url(bucket, key)
     try:
         request = build_egress_request(
@@ -291,13 +312,7 @@ async def _maybe_start_recording_egress(
         )
         info = await start_egress(lk_url, lk_key, lk_secret, request)
 
-        # Prefer the egress-reported location when present; otherwise fall back
-        # to the derived s3:// url for the per-run recording key.
-        file_results = getattr(info, "file_results", None) or []
-        if file_results:
-            location = getattr(file_results[0], "location", None)
-            if location:
-                url = location
+        # Log the egress_id for observability only; it does not alter the url.
         egress_id = getattr(info, "egress_id", None)
         logger.info(
             "started audio egress (egress_id=%s) -> %s",
@@ -328,11 +343,10 @@ async def entrypoint(ctx: JobContext) -> None:
     # plugins and this handler simply read their credentials from os.environ --
     # no per-job .env load is needed here and no secrets are handled directly.
     room_name = ctx.room.name
+    # The single microsecond-precision run identity: shared between the recording
+    # egress key and the vCon flush so recording.ogg and vcon-skeleton.json land
+    # under the SAME run prefix for this call.
     session_start_iso = _utc_now_iso()
-    # Compute ONE timestamp per run and share it between the recording egress key
-    # and the vCon flush so recording.ogg and vcon-skeleton.json land under the
-    # SAME run prefix for this call.
-    run_timestamp = _utc_now_iso()
 
     # Build the unsigned vCon incrementally during the call and record consent
     # BEFORE any dialog turn is appended (the agent speaks the consent script as
@@ -376,7 +390,6 @@ async def entrypoint(ctx: JobContext) -> None:
                 builder.to_dict(),
                 room_name,
                 session_start_iso,
-                timestamp=run_timestamp,
             )
             if result.s3_fallback_to_local:
                 logger.warning(
@@ -400,12 +413,12 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # Start the AUDIO egress now that the agent has joined (unified StartEgress
     # with a TemplateSource(audio_only=True), one mixed file for the room). The
-    # recording.ogg key shares the run prefix with the vCon flush (same
-    # room/session_start/timestamp triple), and the resulting s3:// url is
-    # threaded into the vCon as a recording dialog object BEFORE the shutdown
-    # flush, so the persisted vCon carries the recording location. Egress is
-    # skipped gracefully when BUCKET_NAME/LiveKit creds are absent and guarded so
-    # it never breaks the call.
+    # recording.ogg key shares the single-segment run prefix with the vCon flush
+    # (same room/session_start pair), and the derived s3:// url is threaded into
+    # the vCon as a recording dialog object BEFORE the shutdown flush, so the
+    # persisted vCon carries the recording location. Egress is skipped gracefully
+    # when BUCKET_NAME/LiveKit creds are absent and guarded so it never breaks
+    # the call.
     #
     # NOT on the critical path: we deliberately do NOT drive processing from an
     # ``egress_ended`` webhook/event. The enrichment pipeline polls S3 at the
@@ -417,7 +430,6 @@ async def entrypoint(ctx: JobContext) -> None:
         builder,
         room_name,
         session_start_iso,
-        run_timestamp,
     )
 
     await session.start(
