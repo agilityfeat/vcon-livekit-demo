@@ -26,9 +26,10 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 from livekit import api
 from livekit.agents import (
@@ -55,6 +56,41 @@ ENV_AWS_SECRET_ACCESS_KEY = "AWS_SECRET_ACCESS_KEY"
 ENV_LIVEKIT_URL = "LIVEKIT_URL"
 ENV_LIVEKIT_API_KEY = "LIVEKIT_API_KEY"
 ENV_LIVEKIT_API_SECRET = "LIVEKIT_API_SECRET"
+
+
+def load_env() -> None:
+    """Load a local ``.env`` into ``os.environ`` early and cwd-independently.
+
+    The LiveKit worker reads ``LIVEKIT_URL`` / ``LIVEKIT_API_KEY`` /
+    ``LIVEKIT_API_SECRET`` to connect and REGISTER, which happens inside
+    ``cli.run_app(...)`` in :func:`main` -- *before* any job (so before
+    :func:`entrypoint`) ever runs. The ``.env`` must therefore be loaded before
+    the worker starts, not per-job, otherwise ``python -m vcon_agent.agent dev``
+    fails at registration with "ws_url is required, or set LIVEKIT_URL ...".
+
+    Resolution is cwd-independent so the process can be launched from any
+    directory: we first anchor to the project root relative to this file (the
+    repo root holds ``.env`` / ``.env.example``), then fall back to
+    :func:`find_dotenv`, which searches upward from the cwd. If neither finds a
+    file, ``load_dotenv`` is a harmless no-op and the agent still starts from the
+    real environment (container-injected vars, a parent shell, etc.).
+
+    We do NOT pass ``override=True``: variables already set in the real
+    environment take precedence over the local ``.env`` file.
+    """
+    # src/vcon_agent/agent.py -> repo root is three parents up.
+    project_root_env = Path(__file__).resolve().parents[2] / ".env"
+    if project_root_env.is_file():
+        load_dotenv(project_root_env)
+        return
+    # Fall back to searching upward from the current working directory.
+    load_dotenv(find_dotenv())
+
+
+# Load the local .env at import time so credentials are present no matter how the
+# module is reached (``python -m vcon_agent.agent`` or a direct import). This is
+# a no-op when no file exists and never overrides real-environment variables.
+load_env()
 
 # Roles that correspond to spoken dialog turns we record in the vCon. Other
 # ChatContext roles (``system``/``developer``) are prompt scaffolding, not call
@@ -287,10 +323,10 @@ async def entrypoint(ctx: JobContext) -> None:
     item, and persists the finished vCon exactly once on session end.
     """
     # Config (LiveKit/Deepgram/ElevenLabs/LLM keys + optional AWS vars) is read
-    # from the process environment; load a local .env if present. Plugins and the
-    # worker read their credentials straight from os.environ -- no secrets here.
-    load_dotenv()
-
+    # from the process environment. The local .env is already loaded once, early
+    # (at import time and again in main() before the worker registers), so the
+    # plugins and this handler simply read their credentials from os.environ --
+    # no per-job .env load is needed here and no secrets are handled directly.
     room_name = ctx.room.name
     session_start_iso = _utc_now_iso()
     # Compute ONE timestamp per run and share it between the recording egress key
@@ -401,6 +437,11 @@ async def entrypoint(ctx: JobContext) -> None:
 
 def main() -> None:
     """Run the agent as a LiveKit worker (dev/console/start modes via the CLI)."""
+    # Ensure the local .env is loaded BEFORE cli.run_app(...) starts the worker:
+    # the worker reads LIVEKIT_URL/API_KEY/API_SECRET to connect and register
+    # before any job (entrypoint) runs. load_env() already ran at import, so this
+    # is an idempotent safety net and a no-op when the vars are present.
+    load_env()
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
 
 
