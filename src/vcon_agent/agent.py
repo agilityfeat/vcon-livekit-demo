@@ -115,31 +115,49 @@ def build_egress_request(
     filepath: str,
     access_key: Optional[str],
     secret: Optional[str],
-) -> "api.RoomCompositeEgressRequest":
-    """Build the LiveKit room-composite AUDIO egress request (pure helper).
+) -> "api.StartEgressRequest":
+    """Build the unified LiveKit AUDIO egress request (pure helper).
 
-    Constructs a :class:`api.RoomCompositeEgressRequest` with ``audio_only=True``
-    and a single OGG :class:`api.EncodedFileOutput` whose ``filepath`` is the
-    per-run recording key, uploaded to S3 via :class:`api.S3Upload`. This is a
-    pure value builder with no network call, so tests can assert the request
-    shape (audio-only, OGG, filepath, bucket/region) without touching LiveKit.
+    LiveKit deprecated the five source-specific egress APIs (room-composite, web,
+    participant, track-composite, track) in favour of a single
+    :class:`api.StartEgressRequest` that takes one of three sources
+    (``template``/``web``/``media``). The like-for-like replacement for the old
+    "room-composite, audio-only, single mixed file" recording is a
+    :class:`api.TemplateSource` with ``audio_only=True`` -- that produces ONE
+    mixed audio file for the whole room, exactly as the room-composite path did.
+    (A ``media`` source would capture tracks directly and can emit per-track
+    output, which would change the single-recording.ogg output model, so it is
+    deliberately NOT used here. ``layout``/``custom_base_url`` are left unset on
+    the template because setting either forces the video pipeline.)
+
+    The OGG file output and its S3 upload are wired into the request's repeated
+    ``outputs`` list: a single :class:`api.Output` carrying an
+    :class:`api.FileOutput` (``file_type=OGG``, ``filepath=<recording key>``) and
+    a per-output :class:`api.StorageConfig` whose ``s3`` is the
+    :class:`api.S3Upload`. This is a pure value builder with no network call, so
+    tests can assert the request shape (audio-only, OGG, filepath, bucket/region)
+    without touching LiveKit.
 
     SHORTCUT (acknowledged): audio only (no video) and plain SSE-S3 via the
     S3Upload credentials (no CMK). Production would make audio/video configurable
     per clinical workflow and use SSE-KMS with a customer-managed key.
     """
-    return api.RoomCompositeEgressRequest(
+    return api.StartEgressRequest(
         room_name=room_name,
-        audio_only=True,
-        file_outputs=[
-            api.EncodedFileOutput(
-                file_type=api.EncodedFileType.OGG,
-                filepath=filepath,
-                s3=api.S3Upload(
-                    bucket=bucket,
-                    region=region or "",
-                    access_key=access_key or "",
-                    secret=secret or "",
+        template=api.TemplateSource(audio_only=True),
+        outputs=[
+            api.Output(
+                file=api.FileOutput(
+                    file_type=api.EncodedFileType.OGG,
+                    filepath=filepath,
+                ),
+                storage=api.StorageConfig(
+                    s3=api.S3Upload(
+                        bucket=bucket,
+                        region=region or "",
+                        access_key=access_key or "",
+                        secret=secret or "",
+                    ),
                 ),
             )
         ],
@@ -161,18 +179,20 @@ async def _default_start_egress(
     url: str,
     api_key: str,
     api_secret: str,
-    request: "api.RoomCompositeEgressRequest",
+    request: "api.StartEgressRequest",
 ) -> Any:
     """Live egress start: the one place that talks to LiveKit over the network.
 
-    Kept behind the injectable ``start_egress`` seam in :func:`entrypoint` so
-    unit tests pass a fake and never open a connection. This live path (real
-    LiveKit/AWS) is NOT automatically verifiable in the sandbox, consistent with
-    the live voice path, which also is not automatically verifiable.
+    Uses the unified :meth:`egress.start_egress` endpoint (the replacement for
+    the deprecated ``start_room_composite_egress``). Kept behind the injectable
+    ``start_egress`` seam in :func:`entrypoint` so unit tests pass a fake and
+    never open a connection. This live path (real LiveKit/AWS) is NOT
+    automatically verifiable in the sandbox, consistent with the live voice path,
+    which also is not automatically verifiable.
     """
     client = api.LiveKitAPI(url, api_key, api_secret)
     try:
-        return await client.egress.start_room_composite_egress(request)
+        return await client.egress.start_egress(request)
     finally:
         await client.aclose()
 
@@ -185,7 +205,7 @@ async def _maybe_start_recording_egress(
     *,
     env: Optional[dict] = None,
     start_egress: Optional[
-        Callable[[str, str, str, "api.RoomCompositeEgressRequest"], Awaitable[Any]]
+        Callable[[str, str, str, "api.StartEgressRequest"], Awaitable[Any]]
     ] = None,
 ) -> Optional[str]:
     """Start the audio egress and thread the recording url into the vCon.
@@ -244,7 +264,7 @@ async def _maybe_start_recording_egress(
                 url = location
         egress_id = getattr(info, "egress_id", None)
         logger.info(
-            "started room-composite audio egress (egress_id=%s) -> %s",
+            "started audio egress (egress_id=%s) -> %s",
             egress_id,
             url,
         )
@@ -342,7 +362,8 @@ async def entrypoint(ctx: JobContext) -> None:
 
     await ctx.connect()
 
-    # Start the room-composite AUDIO egress now that the agent has joined. The
+    # Start the AUDIO egress now that the agent has joined (unified StartEgress
+    # with a TemplateSource(audio_only=True), one mixed file for the room). The
     # recording.ogg key shares the run prefix with the vCon flush (same
     # room/session_start/timestamp triple), and the resulting s3:// url is
     # threaded into the vCon as a recording dialog object BEFORE the shutdown

@@ -180,8 +180,12 @@ EHR integration.
 The agent captures the **call audio** to S3 and surfaces its location on the vCon so
 the enrichment pipeline can find and transcribe it. When the agent
 joins a room (right after `ctx.connect()`), it starts a LiveKit
-**room-composite, audio-only egress** that writes an OGG recording directly to
-the S3 bucket.
+**audio-only egress** using the unified `StartEgress` API with a
+`TemplateSource(audio_only=True)` source, which writes a single mixed OGG
+recording for the whole room directly to the S3 bucket. (`StartEgress` with a
+template source is the current replacement for the deprecated
+`StartRoomCompositeEgress` call; the audio-only template keeps the one-mixed-file
+output model.)
 
 ### Where the recording lands
 

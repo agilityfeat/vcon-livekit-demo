@@ -110,7 +110,7 @@ class _FakeFileInfo:
 
 
 class _FakeEgressInfo:
-    """Mimics api.EgressInfo returned by start_room_composite_egress."""
+    """Mimics api.EgressInfo returned by start_egress."""
 
     def __init__(self, egress_id="EG_fake", file_results=None):
         self.egress_id = egress_id
@@ -150,16 +150,24 @@ def test_build_egress_request_audio_only_ogg_s3():
         secret="secret_fake",
     )
 
+    # Unified StartEgress request with an audio-only template source (the
+    # like-for-like replacement for the deprecated room-composite egress).
+    assert isinstance(req, api.StartEgressRequest)
     assert req.room_name == "room-abc"
-    assert req.audio_only is True
-    assert len(req.file_outputs) == 1
-    fo = req.file_outputs[0]
-    assert fo.file_type == api.EncodedFileType.OGG
-    assert fo.filepath == "room-abc/ss/ts/recording.ogg"
-    assert fo.s3.bucket == "my-bucket"
-    assert fo.s3.region == "us-east-1"
-    assert fo.s3.access_key == "AKIA_fake"
-    assert fo.s3.secret == "secret_fake"
+    assert req.HasField("template")
+    assert req.template.audio_only is True
+    # layout / custom_base_url must stay unset so the audio pipeline is used.
+    assert req.template.layout == ""
+    assert req.template.custom_base_url == ""
+    # A single OGG file output with its per-output S3 storage config.
+    assert len(req.outputs) == 1
+    out = req.outputs[0]
+    assert out.file.file_type == api.EncodedFileType.OGG
+    assert out.file.filepath == "room-abc/ss/ts/recording.ogg"
+    assert out.storage.s3.bucket == "my-bucket"
+    assert out.storage.s3.region == "us-east-1"
+    assert out.storage.s3.access_key == "AKIA_fake"
+    assert out.storage.s3.secret == "secret_fake"
 
 
 def test_recording_url_s3_scheme():
@@ -192,9 +200,9 @@ def test_egress_seam_threads_recording_url_into_vcon():
     # The fake egress was driven once with an audio-only OGG request at the key.
     assert len(fake.calls) == 1
     _u, _k, _s, request = fake.calls[0]
-    assert request.audio_only is True
-    assert request.file_outputs[0].file_type == api.EncodedFileType.OGG
-    assert request.file_outputs[0].filepath == expected_key
+    assert request.template.audio_only is True
+    assert request.outputs[0].file.file_type == api.EncodedFileType.OGG
+    assert request.outputs[0].file.filepath == expected_key
 
     # The vCon carries the recording as an external-reference recording dialog.
     dialog = builder.to_dict()["dialog"]
