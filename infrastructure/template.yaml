@@ -9,29 +9,42 @@ AWSTemplateFormatVersion: '2010-09-09'
 #   * S3 bucket        - holds recordings (from LiveKit Egress) plus the
 #                        skeleton / enriched / redacted vCon JSON documents,
 #                        using a unique-key-per-run convention
-#                        (room_name + session start + timestamp prefix).
-#   * Lambda functions - the (stubbed) enrichment pipeline steps, invoked by the
-#                        state machine. Inline Python via Code.ZipFile.
-#   * State machine    - Step Functions orchestrator that runs the pipeline
-#                        Lambdas in sequence; invoked by the local app via
-#                        StartExecution.
+#                        (room_name + session start prefix).
+#   * Lambda functions - the enrichment pipeline steps, invoked by the state
+#                        machine. Inline Python via Code.ZipFile. Each step
+#                        MIRRORS the pure, offline-tested logic in
+#                        src/vcon_agent/enrichment.py + vcon.py (inline code
+#                        cannot import the repo package at AWS runtime).
+#   * State machine    - Step Functions orchestrator that runs the real
+#                        enrichment pipeline (poll S3 -> Transcribe Medical async
+#                        batch awaited by the state machine -> Comprehend Medical
+#                        + Bedrock in parallel -> merge into analysis[]); invoked
+#                        by the local app via StartExecution.
 #   * IAM roles        - a Step Functions execution role and a Lambda execution
 #                        role granting the permissions the pipeline needs.
+#
+# Why Step Functions over a single Lambda: Transcribe Medical batch is ASYNC and
+# can exceed Lambda's hard 15-minute timeout. The state machine OWNS the waiting
+# (a Wait state + GetMedicalTranscriptionJob poll + a Choice loop) plus the
+# retry/catch, so no Lambda ever sleeps past its timeout waiting for the batch
+# job. Each Lambda does one short unit of work and returns.
 #
 # Explicitly NOT created (these are managed services you CALL, not resources you
 # create - the template only grants IAM permission to use them):
 #   * Transcribe Medical, Comprehend Medical, Bedrock
 #   * Bedrock model access (a per-model console opt-in; see README prerequisite)
 #   * No EventBridge / webhook endpoint (enrichment is triggered via
-#     StartExecution by the local app)
+#     StartExecution by the local app, with a deterministic idempotent name)
 #   * No compute for the agent (no ECS / EC2 / Fargate; the agent runs locally)
 # =============================================================================
 
 Description: >-
   Cloud infrastructure for the vCon + LiveKit demo: an S3 bucket
-  (versioning + SSE-S3), a Step Functions state machine orchestrating a stubbed
-  enrichment pipeline, inline-code pipeline Lambda functions, and least-needed
-  IAM roles for Transcribe Medical / Comprehend Medical / Bedrock / S3.
+  (versioning + SSE-S3), a Step Functions state machine orchestrating a real
+  enrichment pipeline (Transcribe Medical async batch, Comprehend Medical, and
+  Bedrock) with turn-level provenance, inline-code pipeline Lambda functions, and
+  least-needed IAM roles for Transcribe Medical / Comprehend Medical / Bedrock /
+  S3.
 
 Parameters:
   ProjectName:
@@ -154,7 +167,9 @@ Resources:
                   - bedrock:InvokeModel
                   - bedrock:InvokeModelWithResponseStream
                 Resource: '*'
-        # S3 read/write scoped to the created bucket and its objects.
+        # S3 read/write scoped to the created bucket and its objects. The S3
+        # poll step uses HeadObject, which is authorized by s3:GetObject (object
+        # scope) plus s3:ListBucket (bucket scope), both granted here.
         - PolicyName: s3-bucket-access
           PolicyDocument:
             Version: '2012-10-17'
@@ -176,17 +191,245 @@ Resources:
           Value: !Ref Environment
 
   # ---------------------------------------------------------------------------
-  # Pipeline Lambda functions (stubbed).
+  # Pipeline Lambda functions (REAL enrichment, inline code).
   #
-  # Each function is a pass-through stub that echoes/annotates its portion of the
-  # vCon skeleton, so the state machine can run end to end on a canned input.
+  # Each function performs one short unit of work and returns, so no Lambda ever
+  # sleeps waiting on the async Transcribe Medical batch job (the STATE MACHINE
+  # owns that wait via a Wait + Choice loop). The inline bodies RESTATE the pure,
+  # offline-tested logic from src/vcon_agent/enrichment.py + vcon.py, because
+  # inline code cannot import the repo package at AWS runtime.
+  #
+  # Envelope convention (unchanged): every step unwraps its input EXACTLY ONCE
+  # with event.get("vcon", event). The first step receives the raw StartExecution
+  # input {"vcon": <doc>}; each later step receives the previous step's output
+  # envelope {"vcon": <doc>, ...}. One unwrap always yields the vCon document.
+  #
   # Shortcut (acknowledged): inline code via Code.ZipFile instead of versioned
   # artifacts in S3/ECR built by a CI/CD pipeline.
   # ---------------------------------------------------------------------------
-  TranscribeStepFunction:
+
+  # Step 1: poll S3 for the recording object before transcribing, so the pipeline
+  # never runs on a missing or partial file. Returns a `recording_ready` boolean
+  # the state machine Choice loops on. HeadObject is authorized by s3:GetObject +
+  # s3:ListBucket on the bucket.
+  PollRecordingFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub '${ProjectName}-${Environment}-transcribe-step'
+      FunctionName: !Sub '${ProjectName}-${Environment}-poll-recording-step'
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 128
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref RecordingsBucket
+      Code:
+        ZipFile: |
+          # Poll S3 for the recording object (HeadObject) so the pipeline never
+          # transcribes a missing or partial file. Returns recording_ready as a
+          # boolean plus the resolved recording key for later steps.
+          #
+          # Unwrap convention: one event.get("vcon", event) yields the vCon doc.
+          import os
+
+          import boto3
+
+          _S3 = boto3.client("s3")
+
+
+          def _recording_key(vcon):
+              # Prefer a recording dialog object's s3:// url (threaded on by the
+              # agent). Fall back to a key the envelope may already carry.
+              for d in vcon.get("dialog", []):
+                  if d.get("type") == "recording" and isinstance(d.get("url"), str):
+                      url = d["url"]
+                      if url.startswith("s3://"):
+                          # s3://<bucket>/<key> -> <key>
+                          rest = url[len("s3://"):]
+                          parts = rest.split("/", 1)
+                          if len(parts) == 2:
+                              return parts[1]
+              return None
+
+
+          def handler(event, context):
+              vcon = event.get("vcon", event)
+              bucket = os.environ.get("BUCKET_NAME", "")
+              key = event.get("recording_key") or _recording_key(vcon)
+
+              ready = False
+              # 🩹 Shortcut: if there is no recording key at all (e.g. the canned
+              # validator input has no real recording), report ready=True so the
+              # downstream canned-transcript stub path can run the pipeline end to
+              # end without a real file. → Production: require a real recording
+              # key and fail closed if it never appears within the SLA.
+              if not key or not bucket:
+                  ready = True
+              else:
+                  try:
+                      _S3.head_object(Bucket=bucket, Key=key)
+                      ready = True
+                  except Exception:
+                      ready = False
+
+              return {
+                  "vcon": vcon,
+                  "step": "poll-recording",
+                  "recording_key": key,
+                  "recording_ready": ready,
+              }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Step 2: load the skeleton vCon from S3 under the run-key prefix. For the
+  # canned/offline path the envelope already carries the doc, so this is a
+  # pass-through that normalizes the envelope for the next state.
+  LoadSkeletonFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-load-skeleton-step'
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 128
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref RecordingsBucket
+      Code:
+        ZipFile: |
+          # Load the skeleton vCon for this run. The agent already PUTs the
+          # skeleton to S3 and passes {"vcon": <doc>} into StartExecution, so the
+          # doc is present on the envelope; if a `skeleton_key` is supplied we
+          # re-read the authoritative copy from S3 instead.
+          #
+          # Unwrap convention: one event.get("vcon", event) yields the vCon doc.
+          import json
+          import os
+
+          import boto3
+
+          _S3 = boto3.client("s3")
+
+
+          def handler(event, context):
+              vcon = event.get("vcon", event)
+              bucket = os.environ.get("BUCKET_NAME", "")
+              skeleton_key = event.get("skeleton_key")
+              if bucket and skeleton_key:
+                  try:
+                      obj = _S3.get_object(Bucket=bucket, Key=skeleton_key)
+                      loaded = json.loads(obj["Body"].read())
+                      if isinstance(loaded, dict) and loaded.get("vcon"):
+                          vcon = loaded
+                  except Exception:
+                      # Fall back to the doc already on the envelope.
+                      pass
+              return {
+                  "vcon": vcon,
+                  "step": "load-skeleton",
+                  "recording_key": event.get("recording_key"),
+              }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Step 3: start the Transcribe Medical BATCH job (async). Returns the job name;
+  # the state machine then polls for completion with its own Wait + Choice loop.
+  StartTranscriptionFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-start-transcription-step'
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 60
+      MemorySize: 128
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref RecordingsBucket
+      Code:
+        ZipFile: |
+          # Start an async Transcribe Medical batch job on the recording. Returns
+          # a job_name; the STATE MACHINE (not this Lambda) owns the wait for
+          # completion, because a real batch job can exceed Lambda's 15-min
+          # timeout.
+          #
+          # 🩹 Shortcut: if there is no real recording (no key / HeadObject never
+          # succeeded) OR starting the job fails, fall back to a canned transcript
+          # so the pipeline is runnable without a real recording. The canned text
+          # is carried on the envelope and the GetTranscription step returns it
+          # immediately. → Production: always start a real job (or use AWS
+          # HealthScribe for clinician-grade notes + transcript in one service).
+          #
+          # Unwrap convention: one event.get("vcon", event) yields the vCon doc.
+          import os
+          import time
+
+          import boto3
+
+          _TRANSCRIBE = boto3.client("transcribe")
+
+          _CANNED_TRANSCRIPT = (
+              "Patient reports a headache for three days and is taking ibuprofen."
+          )
+
+
+          def handler(event, context):
+              vcon = event.get("vcon", event)
+              bucket = os.environ.get("BUCKET_NAME", "")
+              key = event.get("recording_key")
+              ready = bool(event.get("recording_ready"))
+
+              job_name = "vcon-tm-{}".format(int(time.time() * 1000))
+
+              if ready and bucket and key:
+                  try:
+                      _TRANSCRIBE.start_medical_transcription_job(
+                          MedicalTranscriptionJobName=job_name,
+                          LanguageCode="en-US",
+                          Specialty="PRIMARYCARE",
+                          Type="CONVERSATION",
+                          Media={"MediaFileUri": "s3://{}/{}".format(bucket, key)},
+                          OutputBucketName=bucket,
+                      )
+                      return {
+                          "vcon": vcon,
+                          "step": "start-transcription",
+                          "job_name": job_name,
+                          "canned": False,
+                      }
+                  except Exception:
+                      # Fall through to the canned-transcript stub path.
+                      pass
+
+              # Canned-transcript stub path.
+              return {
+                  "vcon": vcon,
+                  "step": "start-transcription",
+                  "job_name": job_name,
+                  "canned": True,
+                  "canned_transcript": _CANNED_TRANSCRIPT,
+              }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Step 4: poll the Transcribe Medical job once and report its status. The state
+  # machine loops Wait -> this -> Choice until COMPLETED/FAILED, so the >15-min
+  # wait lives in the state machine, never in a Lambda.
+  GetTranscriptionFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-get-transcription-step'
       Runtime: python3.12
       Handler: index.handler
       Timeout: 60
@@ -194,30 +437,125 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Code:
         ZipFile: |
-          # STUB: in production this starts an AWS Transcribe Medical job on the
-          # recording in S3 and attaches the transcript dialog to the vCon.
+          # Poll the Transcribe Medical job ONCE and report status + transcript.
+          # The state machine Wait + Choice loop drives repeated calls until the
+          # job reaches COMPLETED or FAILED.
           #
-          # Unwrap convention: every step unwraps exactly once with
-          # event.get("vcon", event). The first step receives the raw
-          # StartExecution input {"vcon": <doc>}; each subsequent step receives
-          # the previous step's output envelope {"vcon": <doc>, ...}. One unwrap
-          # always yields the vCon document, never its top-level version string.
+          # transcript_text_from_transcribe_result mirrors enrichment.py: the
+          # Transcribe result JSON is
+          #   {"results": {"transcripts": [{"transcript": "<text>"}, ...]}}.
+          #
+          # The completed job is started with OutputBucketName set, so its
+          # TranscriptFileUri points at an auth-required S3 object. We read it
+          # through the S3 client (get_object) via s3_location_from_transcribe_uri
+          # (mirrored from enrichment.py), NOT an unauthenticated urllib fetch,
+          # which would 403 against the signed S3 URL.
+          #
+          # Unwrap convention: one event.get("vcon", event) yields the vCon doc.
+          import json
+
+          import boto3
+
+          _TRANSCRIBE = boto3.client("transcribe")
+          _S3 = boto3.client("s3")
+
+
+          def _transcript_text_from_transcribe_result(result_json):
+              results = result_json.get("results") or {}
+              transcripts = results.get("transcripts") or []
+              parts = [
+                  t.get("transcript", "")
+                  for t in transcripts
+                  if t.get("transcript")
+              ]
+              return " ".join(parts).strip()
+
+
+          def _s3_location_from_transcribe_uri(uri):
+              if not isinstance(uri, str) or not uri:
+                  return None
+              if uri.startswith("s3://"):
+                  rest = uri[len("s3://"):]
+                  parts = rest.split("/", 1)
+                  if len(parts) == 2 and parts[0] and parts[1]:
+                      return (parts[0], parts[1])
+                  return None
+              if uri.startswith("https://") or uri.startswith("http://"):
+                  without_scheme = uri.split("://", 1)[1]
+                  host, _, path = without_scheme.partition("/")
+                  path = path.split("?", 1)[0]
+                  if not host or not path:
+                      return None
+                  labels = host.split(".")
+                  if len(labels) >= 2 and (
+                      labels[1] == "s3" or labels[1].startswith("s3-")
+                  ):
+                      bucket = labels[0]
+                      if bucket and path:
+                          return (bucket, path)
+                      return None
+                  if labels and (labels[0] == "s3" or labels[0].startswith("s3-")):
+                      parts = path.split("/", 1)
+                      if len(parts) == 2 and parts[0] and parts[1]:
+                          return (parts[0], parts[1])
+                      return None
+              return None
+
+
           def handler(event, context):
               vcon = event.get("vcon", event)
-              analysis = vcon.setdefault("analysis", [])
-              analysis.append({
-                  "type": "transcript",
-                  "vendor": "aws-transcribe-medical",
-                  "body": "STUBBED transcript - transcribe step ran",
-              })
-              return {"vcon": vcon, "step": "transcribe", "status": "ok"}
+
+              # 🩹 Canned-transcript stub path: skip the real poll entirely and
+              # report COMPLETED immediately with the canned text. → Production:
+              # always poll the real job.
+              if event.get("canned"):
+                  return {
+                      "vcon": vcon,
+                      "step": "get-transcription",
+                      "job_name": event.get("job_name"),
+                      "transcription_status": "COMPLETED",
+                      "transcript_text": event.get("canned_transcript", ""),
+                  }
+
+              job_name = event.get("job_name")
+              status = "FAILED"
+              transcript_text = ""
+              try:
+                  resp = _TRANSCRIBE.get_medical_transcription_job(
+                      MedicalTranscriptionJobName=job_name
+                  )
+                  job = resp.get("MedicalTranscriptionJob", {})
+                  status = job.get("TranscriptionJobStatus", "IN_PROGRESS")
+                  if status == "COMPLETED":
+                      uri = job.get("Transcript", {}).get("TranscriptFileUri")
+                      location = _s3_location_from_transcribe_uri(uri)
+                      if location:
+                          bucket, key = location
+                          obj = _S3.get_object(Bucket=bucket, Key=key)
+                          result_json = json.loads(obj["Body"].read())
+                          transcript_text = _transcript_text_from_transcribe_result(
+                              result_json
+                          )
+              except Exception:
+                  status = "IN_PROGRESS"
+
+              out = {
+                  "vcon": vcon,
+                  "step": "get-transcription",
+                  "job_name": job_name,
+                  "transcription_status": status,
+              }
+              if status == "COMPLETED":
+                  out["transcript_text"] = transcript_text
+              return out
       Tags:
         - Key: Project
           Value: !Ref ProjectName
         - Key: Environment
           Value: !Ref Environment
 
-  ComprehendStepFunction:
+  # Parallel branch A: Comprehend Medical entity extraction (meds + conditions).
+  ComprehendFunction:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub '${ProjectName}-${Environment}-comprehend-step'
@@ -228,32 +566,226 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Code:
         ZipFile: |
-          # STUB: in production this calls Comprehend Medical to detect PHI and
-          # clinical entities, then produces a redacted copy of the vCon.
+          # Comprehend Medical: extract clinical entities from the authoritative
+          # transcript, filtered to meds + conditions (extract_min_entities,
+          # mirrored from enrichment.py). Returns the shaped entity list and the
+          # dialog turn index they are attributed to for provenance.
           #
-          # Each step receives the previous step's output envelope
-          # {"vcon": <doc>, "step": ..., "status": ...} and unwraps exactly once
-          # to recover the vCon document (the same single unwrap the Transcribe
-          # step uses), so the three stubs agree on the envelope shape.
+          # Unwrap convention: one event.get("vcon", event) yields the vCon doc.
+          import boto3
+
+          _CM = boto3.client("comprehendmedical")
+
+          _KEPT_CATEGORIES = frozenset({"MEDICATION", "MEDICAL_CONDITION"})
+
+
+          def _extract_min_entities(comprehend_response):
+              entities = comprehend_response.get("Entities") or []
+              minimal = []
+              for ent in entities:
+                  category = ent.get("Category")
+                  if category not in _KEPT_CATEGORIES:
+                      continue
+                  shaped = {"category": category, "text": ent.get("Text")}
+                  if ent.get("Score") is not None:
+                      shaped["score"] = ent.get("Score")
+                  minimal.append(shaped)
+              return minimal
+
+
+          def _first_patient_turn_index(vcon):
+              # Attribute entities to the first patient (party 0) text turn, else
+              # the first text turn, else 0. 🩹 Shortcut: single-turn attribution.
+              # → Production: per-entity offsets mapped to turns.
+              first_text = None
+              for idx, d in enumerate(vcon.get("dialog", [])):
+                  if d.get("type") == "text":
+                      if first_text is None:
+                          first_text = idx
+                      if d.get("party") == 0:
+                          return idx
+              return first_text if first_text is not None else 0
+
+
           def handler(event, context):
               vcon = event.get("vcon", event)
-              analysis = vcon.setdefault("analysis", [])
-              analysis.append({
-                  "type": "phi-detection",
-                  "vendor": "aws-comprehend-medical",
-                  "body": "STUBBED PHI detection - comprehend/redact step ran",
-              })
-              return {"vcon": vcon, "step": "comprehend", "status": "ok"}
+              transcript_text = event.get("transcript_text", "") or ""
+
+              entities = []
+              # 🩹 Fail-open for demo-runnability: a Comprehend Medical failure
+              # (model access denied, throttling, etc.) returns EMPTY entities
+              # rather than failing the whole execution, BUT we carry a degraded
+              # marker so an operator can tell a real "no meds/conditions
+              # mentioned" apart from a silent failure. → Production: a Catch to a
+              # visible alarm state, retries with backoff, and a hard failure path
+              # surfaced to operators.
+              degraded = None
+              if transcript_text:
+                  try:
+                      resp = _CM.detect_entities_v2(Text=transcript_text)
+                      entities = _extract_min_entities(resp)
+                  except Exception as exc:
+                      entities = []
+                      degraded = "comprehend-medical call failed: {}".format(
+                          type(exc).__name__
+                      )
+
+              return {
+                  "vcon": vcon,
+                  "step": "comprehend",
+                  "entities": entities,
+                  "entities_dialog_index": _first_patient_turn_index(vcon),
+                  "transcript_text": transcript_text,
+                  "entities_degraded": degraded,
+              }
       Tags:
         - Key: Project
           Value: !Ref ProjectName
         - Key: Environment
           Value: !Ref Environment
 
-  EnrichStepFunction:
+  # Parallel branch B: Bedrock physician summary.
+  BedrockFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub '${ProjectName}-${Environment}-enrich-step'
+      FunctionName: !Sub '${ProjectName}-${Environment}-bedrock-step'
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 120
+      MemorySize: 128
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          BEDROCK_MODEL_ID: anthropic.claude-3-haiku-20240307-v1:0
+      Code:
+        ZipFile: |
+          # Bedrock: produce a physician-facing summary of the dialog.
+          # summary_prompt_from_dialog + summary_text_from_bedrock_response are
+          # mirrored from enrichment.py so the shaping is identical to the
+          # offline-tested pure copy.
+          #
+          # Unwrap convention: one event.get("vcon", event) yields the vCon doc.
+          import json
+          import os
+
+          import boto3
+
+          _BEDROCK = boto3.client("bedrock-runtime")
+
+
+          def _summary_prompt_from_dialog(dialog_turns):
+              lines = []
+              for turn in dialog_turns:
+                  if turn.get("type") != "text":
+                      continue
+                  party = turn.get("party")
+                  speaker = (
+                      "Patient" if party == 0
+                      else "Agent" if party == 1
+                      else "Unknown"
+                  )
+                  lines.append("{}: {}".format(speaker, turn.get("body", "")))
+              transcript = "\n".join(lines)
+              return (
+                  "You are a clinical documentation assistant. Write a concise, "
+                  "factual physician-facing summary of the following patient "
+                  "intake conversation. Include the chief complaint, duration, "
+                  "and any medications mentioned. Do not add diagnoses or "
+                  "recommendations.\n\nConversation:\n"
+                  + transcript
+                  + "\n\nSummary:"
+              )
+
+
+          def _summary_text_from_bedrock_response(response):
+              content = response.get("content")
+              if isinstance(content, list):
+                  parts = [
+                      b.get("text", "")
+                      for b in content
+                      if isinstance(b, dict) and b.get("text")
+                  ]
+                  if parts:
+                      return " ".join(parts).strip()
+              completion = response.get("completion")
+              if isinstance(completion, str) and completion.strip():
+                  return completion.strip()
+              outputs = response.get("outputs")
+              if isinstance(outputs, list):
+                  parts = [
+                      o.get("text", "")
+                      for o in outputs
+                      if isinstance(o, dict) and o.get("text")
+                  ]
+                  if parts:
+                      return " ".join(parts).strip()
+              return ""
+
+
+          def _dialog_indices(vcon):
+              return [
+                  idx
+                  for idx, d in enumerate(vcon.get("dialog", []))
+                  if d.get("type") == "text"
+              ]
+
+
+          def handler(event, context):
+              vcon = event.get("vcon", event)
+              prompt = _summary_prompt_from_dialog(vcon.get("dialog", []))
+
+              summary_text = ""
+              # 🩹 Fail-open for demo-runnability: if Bedrock is unavailable
+              # (model not enabled, throttled, etc.) fall back to an EMPTY summary
+              # rather than failing the pipeline, BUT carry a degraded marker so
+              # an operator can tell an intentionally empty summary apart from a
+              # silent model failure. → Production: a pinned model id, token
+              # accounting, retries, and a hard failure path surfaced to
+              # operators.
+              degraded = None
+              try:
+                  body = json.dumps(
+                      {
+                          "anthropic_version": "bedrock-2023-05-31",
+                          "max_tokens": 512,
+                          "messages": [
+                              {"role": "user", "content": prompt}
+                          ],
+                      }
+                  )
+                  resp = _BEDROCK.invoke_model(
+                      modelId=os.environ.get("BEDROCK_MODEL_ID", ""),
+                      body=body,
+                  )
+                  payload = json.loads(resp["body"].read())
+                  summary_text = _summary_text_from_bedrock_response(payload)
+              except Exception as exc:
+                  summary_text = ""
+                  degraded = "bedrock invoke_model failed: {}".format(
+                      type(exc).__name__
+                  )
+
+              return {
+                  "vcon": vcon,
+                  "step": "bedrock",
+                  "summary_text": summary_text,
+                  "summary_dialog_indices": _dialog_indices(vcon),
+                  "summary_degraded": degraded,
+              }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Final step: merge the transcript + Comprehend + Bedrock outputs into the vCon
+  # analysis[] with dialog turn-index provenance, in a deterministic order
+  # (transcript, entities, summary). Receives the Parallel state output, which is
+  # an ARRAY of the two branch envelopes.
+  MergeFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-merge-step'
       Runtime: python3.12
       Handler: index.handler
       Timeout: 60
@@ -261,21 +793,97 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Code:
         ZipFile: |
-          # STUB: in production this calls Bedrock (bedrock:InvokeModel) to
-          # summarise/enrich the conversation, then writes the enriched vCon to
-          # S3 under the unique-key-per-run prefix.
+          # Merge branch outputs into analysis[] with turn-index provenance. The
+          # analysis entry shapes mirror vcon.py's add_transcript_analysis /
+          # add_entities_analysis / add_summary_analysis (type, vendor,
+          # authoritative flag, dialog turn-index provenance, body, and an
+          # optional `degraded` marker carried from a branch that failed open).
           #
-          # Unwraps the incoming envelope exactly once (same as the other two
-          # steps) to recover the vCon document.
+          # The clinical Transcribe Medical transcript is added to analysis[]
+          # marked authoritative and sits ALONGSIDE the live Deepgram transcript
+          # already in dialog[] (the dual-transcript design). Final analysis order
+          # is deterministic: transcript, entities, summary.
+          #
+          # Input is the Parallel state output: a list of the two branch
+          # envelopes (Comprehend branch, Bedrock branch). Each branch carries the
+          # same vcon; we take the vcon from the first branch and merge both.
+
+
+          def _branch(branches, step):
+              for b in branches:
+                  if isinstance(b, dict) and b.get("step") == step:
+                      return b
+              return {}
+
+
+          def _text_dialog_indices(vcon):
+              return [
+                  idx
+                  for idx, d in enumerate(vcon.get("dialog", []))
+                  if d.get("type") == "text"
+              ]
+
+
           def handler(event, context):
-              vcon = event.get("vcon", event)
-              analysis = vcon.setdefault("analysis", [])
-              analysis.append({
+              # The Parallel state hands us a list of branch outputs. Be tolerant
+              # of also receiving a single envelope.
+              branches = event if isinstance(event, list) else [event]
+              comprehend = _branch(branches, "comprehend")
+              bedrock = _branch(branches, "bedrock")
+
+              base = comprehend or bedrock or (branches[0] if branches else {})
+              vcon = base.get("vcon", base)
+              vcon.setdefault("analysis", [])
+
+              transcript_text = comprehend.get("transcript_text", "") or ""
+              covered = _text_dialog_indices(vcon)
+
+              # 1) transcript (authoritative clinical transcript, dual-transcript).
+              vcon["analysis"].append(
+                  {
+                      "type": "transcript",
+                      "vendor": "aws-transcribe-medical",
+                      "authoritative": True,
+                      "dialog": covered,
+                      "body": transcript_text,
+                      "mimetype": "text/plain",
+                  }
+              )
+
+              # 2) entities (Comprehend Medical, meds + conditions). A
+              # `degraded` marker is attached ONLY when the Comprehend branch
+              # failed open, so an operator can tell real emptiness from a silent
+              # model-access/throttle failure.
+              entities = comprehend.get("entities", []) or []
+              entities_index = comprehend.get("entities_dialog_index", 0)
+              entities_entry = {
+                  "type": "entities",
+                  "vendor": "aws-comprehend-medical",
+                  "dialog": [int(entities_index)],
+                  "body": entities,
+              }
+              entities_degraded = comprehend.get("entities_degraded")
+              if entities_degraded:
+                  entities_entry["degraded"] = entities_degraded
+              vcon["analysis"].append(entities_entry)
+
+              # 3) summary (Bedrock physician summary). Same degraded-marker
+              # treatment as entities above.
+              summary_text = bedrock.get("summary_text", "") or ""
+              summary_indices = bedrock.get("summary_dialog_indices", covered) or covered
+              summary_entry = {
                   "type": "summary",
                   "vendor": "aws-bedrock",
-                  "body": "STUBBED summary - enrich/bedrock step ran",
-              })
-              return {"vcon": vcon, "step": "enrich", "status": "ok"}
+                  "dialog": [int(i) for i in summary_indices],
+                  "body": summary_text,
+                  "mimetype": "text/plain",
+              }
+              summary_degraded = bedrock.get("summary_degraded")
+              if summary_degraded:
+                  summary_entry["degraded"] = summary_degraded
+              vcon["analysis"].append(summary_entry)
+
+              return {"vcon": vcon, "step": "merge", "status": "ok"}
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -295,7 +903,8 @@ Resources:
 
   # ---------------------------------------------------------------------------
   # Step Functions execution role (trusts states.amazonaws.com).
-  # Allows invoking the pipeline Lambdas and writing execution logs.
+  # Allows invoking every pipeline Lambda the ASL references and writing
+  # execution logs.
   # ---------------------------------------------------------------------------
   StateMachineExecutionRole:
     Type: AWS::IAM::Role
@@ -316,9 +925,13 @@ Resources:
               - Effect: Allow
                 Action: lambda:InvokeFunction
                 Resource:
-                  - !GetAtt TranscribeStepFunction.Arn
-                  - !GetAtt ComprehendStepFunction.Arn
-                  - !GetAtt EnrichStepFunction.Arn
+                  - !GetAtt PollRecordingFunction.Arn
+                  - !GetAtt LoadSkeletonFunction.Arn
+                  - !GetAtt StartTranscriptionFunction.Arn
+                  - !GetAtt GetTranscriptionFunction.Arn
+                  - !GetAtt ComprehendFunction.Arn
+                  - !GetAtt BedrockFunction.Arn
+                  - !GetAtt MergeFunction.Arn
         # CloudWatch Logs for Step Functions logging. These log actions must be
         # granted on "*" per the Step Functions logging requirements.
         - PolicyName: state-machine-logging
@@ -343,12 +956,28 @@ Resources:
           Value: !Ref Environment
 
   # ---------------------------------------------------------------------------
-  # Step Functions state machine: the enrichment orchestrator.
+  # Step Functions state machine: the REAL enrichment orchestrator.
   #
-  # A simple sequential Task workflow (Transcribe -> Comprehend -> Enrich ->
-  # Succeed). The DefinitionString uses !Sub to inject the Lambda ARNs. It
-  # accepts a canned skeleton vCon as input and passes it through the stubbed
-  # steps, so the whole pipeline runs end to end.
+  # Flow:
+  #   WaitForRecording (poll S3 HeadObject)
+  #     -> IsRecordingReady (Choice) -- not ready --> WaitBeforeRecording (Wait)
+  #                                                      -> WaitForRecording
+  #     -> LoadSkeleton
+  #     -> StartTranscription (async Transcribe Medical batch)
+  #     -> WaitForTranscription (Wait)  <----------------------+
+  #     -> GetTranscription (poll the job once)                |
+  #     -> IsTranscriptionComplete (Choice)                    |
+  #           COMPLETED -> Analyze                              |
+  #           FAILED    -> TranscriptionFailed (Fail)          |
+  #           otherwise -> WaitForTranscription ---------------+
+  #     -> Analyze (Parallel: Comprehend | Bedrock)
+  #     -> Merge (into analysis[] with turn-index provenance)
+  #     -> Done (Succeed)
+  #
+  # The Wait + GetTranscription + Choice loop is how the STATE MACHINE owns the
+  # wait for the async batch job (which can exceed Lambda's 15-min timeout).
+  #
+  # The DefinitionString uses !Sub to inject the Lambda ARNs.
   # ---------------------------------------------------------------------------
   EnrichmentStateMachine:
     Type: AWS::StepFunctions::StateMachine
@@ -363,23 +992,101 @@ Resources:
               LogGroupArn: !GetAtt StateMachineLogGroup.Arn
       DefinitionString: !Sub |
         {
-          "Comment": "Stubbed vCon enrichment pipeline.",
-          "StartAt": "Transcribe",
+          "Comment": "Real vCon enrichment pipeline: poll S3 -> Transcribe Medical async batch -> Comprehend Medical + Bedrock (parallel) -> merge into analysis[] with turn-index provenance.",
+          "StartAt": "WaitForRecording",
           "States": {
-            "Transcribe": {
+            "WaitForRecording": {
               "Type": "Task",
-              "Resource": "${TranscribeStepFunction.Arn}",
-              "Next": "Comprehend"
+              "Resource": "${PollRecordingFunction.Arn}",
+              "Next": "IsRecordingReady"
             },
-            "Comprehend": {
-              "Type": "Task",
-              "Resource": "${ComprehendStepFunction.Arn}",
-              "Next": "Enrich"
+            "IsRecordingReady": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.recording_ready",
+                  "BooleanEquals": true,
+                  "Next": "LoadSkeleton"
+                }
+              ],
+              "Default": "WaitBeforeRecording"
             },
-            "Enrich": {
+            "WaitBeforeRecording": {
+              "Type": "Wait",
+              "Seconds": 5,
+              "Next": "WaitForRecording"
+            },
+            "LoadSkeleton": {
               "Type": "Task",
-              "Resource": "${EnrichStepFunction.Arn}",
+              "Resource": "${LoadSkeletonFunction.Arn}",
+              "Next": "StartTranscription"
+            },
+            "StartTranscription": {
+              "Type": "Task",
+              "Resource": "${StartTranscriptionFunction.Arn}",
+              "Next": "WaitForTranscription"
+            },
+            "WaitForTranscription": {
+              "Type": "Wait",
+              "Seconds": 5,
+              "Next": "GetTranscription"
+            },
+            "GetTranscription": {
+              "Type": "Task",
+              "Resource": "${GetTranscriptionFunction.Arn}",
+              "Next": "IsTranscriptionComplete"
+            },
+            "IsTranscriptionComplete": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.transcription_status",
+                  "StringEquals": "COMPLETED",
+                  "Next": "Analyze"
+                },
+                {
+                  "Variable": "$.transcription_status",
+                  "StringEquals": "FAILED",
+                  "Next": "TranscriptionFailed"
+                }
+              ],
+              "Default": "WaitForTranscription"
+            },
+            "Analyze": {
+              "Type": "Parallel",
+              "Branches": [
+                {
+                  "StartAt": "Comprehend",
+                  "States": {
+                    "Comprehend": {
+                      "Type": "Task",
+                      "Resource": "${ComprehendFunction.Arn}",
+                      "End": true
+                    }
+                  }
+                },
+                {
+                  "StartAt": "Bedrock",
+                  "States": {
+                    "Bedrock": {
+                      "Type": "Task",
+                      "Resource": "${BedrockFunction.Arn}",
+                      "End": true
+                    }
+                  }
+                }
+              ],
+              "Next": "Merge"
+            },
+            "Merge": {
+              "Type": "Task",
+              "Resource": "${MergeFunction.Arn}",
               "Next": "Done"
+            },
+            "TranscriptionFailed": {
+              "Type": "Fail",
+              "Error": "TranscriptionFailed",
+              "Cause": "Transcribe Medical job did not complete successfully."
             },
             "Done": {
               "Type": "Succeed"

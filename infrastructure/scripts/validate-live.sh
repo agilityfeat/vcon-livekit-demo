@@ -150,17 +150,26 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Check: the three expected pipeline Lambda functions exist. Names are prefixed
-# with the stack name (default ProjectName), e.g.
-# vcon-livekit-demo-dev-transcribe-step. We list the functions whose names
-# start with the stack name and assert one of each suffix is present.
+# Check: the pipeline Lambda functions exist. Names are prefixed with the stack
+# name (default ProjectName), e.g. vcon-livekit-demo-dev-comprehend-step. We
+# list the functions whose names start with the stack name and assert one of
+# each suffix is present. These are the seven real pipeline steps (poll S3 ->
+# load skeleton -> start/get Transcribe Medical -> Comprehend + Bedrock parallel
+# -> merge), so the suffix list matches the states defined in template.yaml.
 # ---------------------------------------------------------------------------
 FUNCTION_NAMES="$(aws lambda list-functions \
   "${REGION_ARG[@]}" \
   --query "Functions[?starts_with(FunctionName, '${STACK_NAME}')].FunctionName" \
   --output text 2>/dev/null || echo "")"
 
-for suffix in transcribe-step comprehend-step enrich-step; do
+for suffix in \
+  poll-recording-step \
+  load-skeleton-step \
+  start-transcription-step \
+  get-transcription-step \
+  comprehend-step \
+  bedrock-step \
+  merge-step; do
   if echo "${FUNCTION_NAMES}" | tr '\t' '\n' | grep -q -- "-${suffix}$"; then
     pass "Lambda function present: *-${suffix}"
   else
@@ -187,6 +196,14 @@ fi
 # input documented in infrastructure/README.md), poll until it finishes, then
 # assert SUCCEEDED and that the output preserves the vCon version and carries
 # the three analysis entries in order.
+#
+# NOTE: this canned input has NO real recording dialog object, so there is no
+# recording file in S3. The pipeline tolerates that on purpose: the poll step
+# reports ready (nothing to wait for) and the transcribe step takes the
+# canned-transcript stub path, so the execution still reaches Merge and
+# produces the real analysis types. Allow generous time because the state
+# machine runs the Transcribe wait/poll loop and the Comprehend/Bedrock
+# parallel branch.
 # ---------------------------------------------------------------------------
 CANNED_INPUT='{
   "vcon": {
@@ -214,10 +231,11 @@ else
   echo "  executionArn = ${EXECUTION_ARN}"
 
   # Poll describe-execution until status leaves RUNNING, with a sane timeout
-  # (~60s: 30 attempts, 2s apart).
+  # (~120s: 60 attempts, 2s apart). The state machine itself waits in 5s
+  # increments (recording poll + Transcribe poll), so give it room.
   EXEC_STATUS="RUNNING"
   EXEC_OUTPUT=""
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 60); do
     EXEC_STATUS="$(aws stepfunctions describe-execution \
       --execution-arn "${EXECUTION_ARN}" \
       "${REGION_ARG[@]}" \
@@ -246,16 +264,17 @@ else
     fail "execution produced no output JSON to inspect"
   else
     # Assert the output preserves top-level "vcon": "0.0.1" and contains the
-    # three analysis entries in order: transcript, phi-detection, summary.
-    # Use python3 for robust JSON parsing (avoids a hard jq dependency).
+    # three analysis entries in order: transcript, entities, summary. The Merge
+    # step writes them in that deterministic order. Use python3 for robust JSON
+    # parsing (avoids a hard jq dependency).
     if printf '%s' "${EXEC_OUTPUT}" | python3 -c '
 import json
 import sys
 
 data = json.load(sys.stdin)
 
-# The state machine passes each step output envelope on to the next, so the
-# final execution output is {"vcon": <doc>, "step": ..., "status": ...}.
+# The Merge step returns {"vcon": <doc>, "step": "merge", "status": "ok"}, so
+# one unwrap yields the enriched vCon document.
 vcon = data.get("vcon", data)
 
 version = vcon.get("vcon")
@@ -264,14 +283,30 @@ if version != "0.0.1":
     sys.exit(1)
 
 types = [a.get("type") for a in vcon.get("analysis", [])]
-expected = ["transcript", "phi-detection", "summary"]
+expected = ["transcript", "entities", "summary"]
 if types != expected:
     print("analysis order mismatch: %r != %r" % (types, expected), file=sys.stderr)
     sys.exit(1)
+
+# The clinical Transcribe Medical transcript must be marked authoritative
+# (the dual-transcript design: it sits alongside the live Deepgram transcript).
+transcript = vcon["analysis"][0]
+if transcript.get("authoritative") is not True:
+    print("transcript analysis is not marked authoritative", file=sys.stderr)
+    sys.exit(1)
+
+# On a HEALTHY run, the entities and summary entries must NOT carry a
+# "degraded" marker. That marker is only present when the Comprehend or Bedrock
+# step failed open (model access denied / throttled / model not enabled), so
+# its presence here would mean the canned end-to-end run silently lost analysis.
+for a in vcon.get("analysis", []):
+    if a.get("degraded"):
+        print("analysis entry %r is degraded: %r" % (a.get("type"), a.get("degraded")), file=sys.stderr)
+        sys.exit(1)
 '; then
-      pass 'execution output preserves "vcon": "0.0.1" and has analysis [transcript, phi-detection, summary] in order'
+      pass 'execution output preserves "vcon": "0.0.1" and has analysis [transcript, entities, summary] in order (transcript authoritative, no degraded markers)'
     else
-      fail 'execution output did not match: expected "vcon": "0.0.1" and analysis [transcript, phi-detection, summary]'
+      fail 'execution output did not match: expected "vcon": "0.0.1" and analysis [transcript, entities, summary]'
     fi
   fi
 fi
