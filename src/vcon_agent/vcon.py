@@ -79,19 +79,39 @@ def role_to_index(role: str) -> int:
         raise ValueError(f"unknown role: {role!r}") from None
 
 
-def run_key(room_name: str, session_start_iso: str, timestamp: Optional[str] = None) -> str:
+def run_key(room_name: str, session_start_iso: str) -> str:
     """Build the unique-key-per-run S3 object key for the vCon skeleton.
 
     Layout (exactly as documented in infrastructure/README.md):
 
-        <room_name>/<session_start_iso>/<timestamp>/vcon-skeleton.json
+        <room_name>/<session_start_iso>/vcon-skeleton.json
 
-    ``timestamp`` defaults to the current UTC time so each flush lands under a
-    distinct prefix even if the room name and session start repeat.
+    ``session_start_iso`` is a microsecond-precision UTC ISO instant captured
+    once at entry, so it uniquely identifies the run on its own; combined with
+    the bucket's versioning this neutralizes any accidental overwrite. It is the
+    single run segment shared with :func:`recording_key`.
     """
-    if timestamp is None:
-        timestamp = _utc_now_iso()
-    return f"{room_name}/{session_start_iso}/{timestamp}/vcon-skeleton.json"
+    return f"{room_name}/{session_start_iso}/vcon-skeleton.json"
+
+
+def recording_key(room_name: str, session_start_iso: str) -> str:
+    """Build the unique-key-per-run S3 object key for the call recording.
+
+    Layout (exactly as documented in infrastructure/README.md, parallel to
+    :func:`run_key`):
+
+        <room_name>/<session_start_iso>/recording.ogg
+
+    The per-run key has a SINGLE time segment: ``session_start_iso`` (a
+    microsecond-precision UTC ISO instant captured once at entry) is the whole
+    run identity. Passing the same ``(room_name, session_start_iso)`` pair to
+    BOTH this helper and :func:`run_key` keeps ``recording.ogg`` and
+    ``vcon-skeleton.json`` under the identical run prefix. This is deliberately
+    NOT an overload of :func:`run_key`: the two objects live side by side under
+    the shared prefix but have distinct object names (recording.ogg vs.
+    vcon-skeleton.json).
+    """
+    return f"{room_name}/{session_start_iso}/recording.ogg"
 
 
 class VConBuilder:
@@ -211,6 +231,43 @@ class VConBuilder:
         :meth:`add_dialog_turn`.
         """
         return self.add_dialog_turn(role_to_index(role), text, start=start)
+
+    def add_recording_dialog(
+        self,
+        url: str,
+        start: Optional[str] = None,
+        mimetype: str = "audio/ogg",
+        filename: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Append a 'recording' dialog object pointing at the call audio in S3.
+
+        The recording is whole-call audio captured by LiveKit Egress and stored
+        in S3. It is carried as an EXTERNAL REFERENCE: the ``url`` field points at
+        the S3 object (e.g. ``s3://<bucket>/<key>``) and the audio bytes are
+        NEVER inlined into the vCon. Unlike :meth:`add_dialog_turn`, this is not
+        patient/agent speech, so it does NOT reference a single party index; it
+        represents the whole call.
+
+        SHORTCUT (acknowledged): audio only (no video); plain SSE-S3 (no CMK);
+        readiness is handled by polling S3 at the recording key, not
+        event-driven here. Production would support configurable video egress,
+        SSE-KMS with a CMK, and event-driven readiness with proper dedupe on the
+        egress id and reconciliation for missing/early/truncated egress events.
+        """
+        if start is None:
+            start = _utc_now_iso()
+        entry: Dict[str, Any] = {
+            "type": "recording",
+            # External reference ONLY: the url locates the audio in S3; the
+            # audio bytes are never embedded in the vCon document.
+            "url": url,
+            "start": start,
+            "mimetype": mimetype,
+        }
+        if filename is not None:
+            entry["filename"] = filename
+        self._doc["dialog"].append(entry)
+        return entry
 
     def to_dict(self) -> Dict[str, Any]:
         """Return the current in-memory vCon document."""

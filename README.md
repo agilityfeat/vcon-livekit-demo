@@ -65,7 +65,7 @@ When the session ends, the agent flushes the finished vCon **exactly once**
 
 - If `BUCKET_NAME` is set, it PUTs the vCon JSON to the AWS enrichment backend's
   S3 bucket under the unique-key-per-run convention
-  `<room_name>/<session_start_iso>/<timestamp>/vcon-skeleton.json`, then (only if
+  `<room_name>/<session_start_iso>/vcon-skeleton.json`, then (only if
   `STATE_MACHINE_ARN` is also set) triggers enrichment via a guarded Step
   Functions `StartExecution` with input `{"vcon": <doc>}`.
 - If `BUCKET_NAME` is unset, it writes the same document to a local file under
@@ -174,3 +174,89 @@ python3 -m pytest tests/ -q
 
 Out of scope: authentication/authorization, multi-party calls, and any
 EHR integration.
+
+## Call recording
+
+The agent captures the **call audio** to S3 and surfaces its location on the vCon so
+the enrichment pipeline can find and transcribe it. When the agent
+joins a room (right after `ctx.connect()`), it starts a LiveKit
+**audio-only egress** using the unified `StartEgress` API with a
+`TemplateSource(audio_only=True)` source, which writes a single mixed OGG
+recording for the whole room directly to the S3 bucket. (`StartEgress` with a
+template source is the current replacement for the deprecated
+`StartRoomCompositeEgress` call; the audio-only template keeps the one-mixed-file
+output model.)
+
+### Where the recording lands
+
+The egress writes to the **same unique run prefix** the vCon flush uses, so the
+recording and the skeleton vCon sit side by side:
+
+```
+<room_name>/<session_start_iso>/recording.ogg
+<room_name>/<session_start_iso>/vcon-skeleton.json
+```
+
+The per-run key has a **single time segment**: `session_start_iso` is a
+microsecond-precision UTC instant captured once at entry and shared between the
+recording key and the vCon flush, so `recording_key(...)` and `run_key(...)`
+always resolve to the same run prefix. This layout matches the S3
+unique-key-per-run convention documented in
+**[infrastructure/README.md](infrastructure/README.md)**; the unique key plus
+the bucket's **versioning** together neutralize the "a later egress overwrites
+the earlier file" failure mode.
+
+LiveKit Egress also writes a sibling `EG_<id>.json` **manifest** object next to
+`recording.ogg`. This is **intentionally retained** for provenance: it carries
+the egress id, the started_at/ended_at timings, and the resolved object
+location. The enrichment pipeline keys off `recording.ogg` and can ignore the
+manifest; set `disable_manifest=True` on the egress `FileOutput` if you prefer a
+bucket that holds only `recording.ogg`.
+
+### Recording location on the vCon
+
+The recording S3 location is recorded on the vCon as a **recording dialog
+object** (`type: "recording"`) via `VConBuilder.add_recording_dialog(url, ...)`
+in the framework-independent `src/vcon_agent/vcon.py`. The audio is referenced
+**externally**: the dialog carries the `s3://<bucket>/<key>` location as a `url`
+field and **never inlines the audio bytes**. Unlike patient/agent dialog turns,
+the recording object represents the whole-call audio, so it is not tied to a
+party index. The agent threads this url onto the vCon **before** the session-end
+flush, so the persisted `vcon-skeleton.json` already carries the recording
+location.
+
+### Readiness is decoupled from egress webhooks
+
+Rather than relying on the LiveKit `egress_ended` webhook to drive downstream
+processing, readiness is **poll-based**: the enrichment pipeline polls S3 for the object at the
+known recording key. This sidesteps the duplicate / early / missing-webhook
+failure modes. The agent may subscribe to `egress_ended` for
+logging/observability only; it is explicitly **not on the critical path** and
+triggers no processing.
+
+### Env-optional
+
+Live egress needs `BUCKET_NAME` + `AWS_REGION` **and** the LiveKit credentials
+(`LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET`). When `BUCKET_NAME` or
+the LiveKit creds are absent, the agent **skips egress gracefully** (logged, the
+call is never broken) so the standalone local demo still runs, mirroring the
+env-optional behavior of the persistence layer. `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY` are used for the S3 upload credentials if present and
+otherwise fall back to the instance role.
+
+The **live egress path is not part of automated
+verification**: it needs real LiveKit and AWS credentials and cannot be
+exercised offline. The egress call sits behind an injectable/mockable seam, so
+the recording-key helper, the recording dialog object, and the egress-request
+builder are all unit-tested offline with fakes (no live LiveKit/AWS).
+
+### Acknowledged shortcuts (demo) vs. production
+
+- 🩹 **Plain SSE-S3, no customer-managed KMS key** for the recordings. →
+  *Production:* SSE-KMS with a CMK, bucket policy, and VPC endpoints.
+- 🩹 **Poll-based readiness** (polls S3 at the recording key with a simple
+  timeout/retry). → *Production:* event-driven readiness with proper dedupe on
+  `egressId`, reconciliation for missing events, and handling of early/truncated
+  egress.
+- 🩹 **Audio only, no video** egress. → *Production:* configurable, with video
+  egress if the clinical workflow needs it.

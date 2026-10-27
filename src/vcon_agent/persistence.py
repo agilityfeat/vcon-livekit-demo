@@ -8,7 +8,7 @@ real AWS call.
 Behavior on flush (:func:`persist_vcon`):
 
 * If ``BUCKET_NAME`` is set, PUT the vCon JSON to S3 at the unique run key
-  (``<room_name>/<session_start_iso>/<timestamp>/vcon-skeleton.json``) with
+  (``<room_name>/<session_start_iso>/vcon-skeleton.json``) with
   ``ContentType=application/json``. Then, if ``STATE_MACHINE_ARN`` is also set,
   trigger enrichment via Step Functions ``start_execution`` with input
   ``json.dumps({"vcon": <doc>})`` -- the exact envelope the enrichment state machine
@@ -73,7 +73,6 @@ def persist_vcon(
     room_name: str,
     session_start_iso: str,
     *,
-    timestamp: Optional[str] = None,
     env: Optional[Dict[str, str]] = None,
     s3_client: Optional[Any] = None,
     sfn_client: Optional[Any] = None,
@@ -86,10 +85,8 @@ def persist_vcon(
     vcon_doc:
         The in-memory vCon document (e.g. ``VConBuilder.to_dict()``).
     room_name, session_start_iso:
-        Used to build the unique run key.
-    timestamp:
-        Optional explicit timestamp segment for the run key; defaults to the
-        current UTC time inside :func:`~vcon_agent.vcon.run_key`.
+        Used to build the unique run key. ``session_start_iso`` is the single
+        microsecond-precision run segment, so no separate timestamp is needed.
     env:
         Config source; defaults to ``os.environ``. Injectable so tests can pass
         an explicit mapping without touching the real process environment.
@@ -109,7 +106,7 @@ def persist_vcon(
     if env is None:
         env = os.environ
 
-    key = run_key(room_name, session_start_iso, timestamp=timestamp)
+    key = run_key(room_name, session_start_iso)
     body_bytes = json.dumps(vcon_doc).encode("utf-8")
 
     bucket_name = env.get(ENV_BUCKET_NAME)

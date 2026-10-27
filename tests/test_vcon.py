@@ -9,6 +9,7 @@ from vcon_agent.vcon import (
     PATIENT_INDEX,
     VCON_VERSION,
     VConBuilder,
+    recording_key,
     role_to_index,
     run_key,
 )
@@ -137,11 +138,78 @@ def test_add_dialog_turn_by_role():
 
 
 def test_run_key_layout_exact():
-    key = run_key("room-abc", "2024-01-01T00:00:00+00:00", timestamp="1700000000")
-    assert key == "room-abc/2024-01-01T00:00:00+00:00/1700000000/vcon-skeleton.json"
-
-
-def test_run_key_defaults_timestamp():
     key = run_key("room-abc", "2024-01-01T00:00:00+00:00")
-    assert key.startswith("room-abc/2024-01-01T00:00:00+00:00/")
-    assert key.endswith("/vcon-skeleton.json")
+    assert key == "room-abc/2024-01-01T00:00:00+00:00/vcon-skeleton.json"
+
+
+def test_recording_key_layout_exact():
+    key = recording_key("room-abc", "2024-01-01T00:00:00+00:00")
+    assert key == "room-abc/2024-01-01T00:00:00+00:00/recording.ogg"
+
+
+def test_recording_key_and_run_key_share_run_prefix():
+    # Given the SAME (room, session_start) pair, recording.ogg and
+    # vcon-skeleton.json must live under the identical single-segment run prefix.
+    room = "room-abc"
+    session_start = "2024-01-01T00:00:00+00:00"
+    rec = recording_key(room, session_start)
+    vcon = run_key(room, session_start)
+
+    assert rec.rsplit("/", 1)[0] == vcon.rsplit("/", 1)[0]
+    assert rec.rsplit("/", 1)[0] == f"{room}/{session_start}"
+    assert rec.endswith("/recording.ogg")
+    assert vcon.endswith("/vcon-skeleton.json")
+
+
+def test_add_recording_dialog_external_reference_no_inline_bytes():
+    builder = VConBuilder()
+    url = "s3://my-bucket/room-abc/2024-01-01T00:00:00+00:00/recording.ogg"
+    entry = builder.add_recording_dialog(url)
+
+    doc = builder.to_dict()
+    assert len(doc["dialog"]) == 1
+    assert doc["dialog"][0] is entry
+
+    assert entry["type"] == "recording"
+    # External reference: the url locates the audio, bytes are never inlined.
+    assert entry["url"] == url
+    assert entry["mimetype"] == "audio/ogg"
+    assert entry["start"]
+    # No inline audio body/payload of any kind.
+    assert "body" not in entry
+    assert "payload" not in entry
+    # The recording dialog is whole-call audio, not a party turn.
+    assert "party" not in entry
+
+
+def test_add_recording_dialog_does_not_require_consent_or_party():
+    # Unlike add_dialog_turn, a recording dialog is whole-call audio and does not
+    # require consent ordering or a party index.
+    builder = VConBuilder()
+    assert builder.consent_recorded is False
+    entry = builder.add_recording_dialog("s3://b/k/recording.ogg")
+    assert entry["type"] == "recording"
+    assert "party" not in entry
+
+
+def test_add_recording_dialog_custom_mimetype_and_filename():
+    builder = VConBuilder()
+    entry = builder.add_recording_dialog(
+        "s3://b/k/recording.ogg",
+        start="2024-01-01T00:00:00+00:00",
+        mimetype="audio/ogg",
+        filename="recording.ogg",
+    )
+    assert entry["start"] == "2024-01-01T00:00:00+00:00"
+    assert entry["mimetype"] == "audio/ogg"
+    assert entry["filename"] == "recording.ogg"
+
+
+def test_add_recording_dialog_appends_after_turns():
+    builder = VConBuilder()
+    builder.add_consent(granted=True)
+    builder.add_dialog_turn(PATIENT_INDEX, "I have a headache.")
+    builder.add_recording_dialog("s3://b/k/recording.ogg")
+
+    dialog = builder.to_dict()["dialog"]
+    assert [d["type"] for d in dialog] == ["text", "recording"]

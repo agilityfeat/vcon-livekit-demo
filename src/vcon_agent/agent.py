@@ -24,11 +24,14 @@ credentials and is out of scope for automated verification.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
-from typing import Optional
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Optional
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
+from livekit import api
 from livekit.agents import (
     Agent,
     AgentSession,
@@ -40,9 +43,54 @@ from livekit.agents import (
 from livekit.plugins import deepgram, elevenlabs, openai
 
 from .persistence import persist_vcon
-from .vcon import DEFAULT_CONSENT_SCRIPT, VConBuilder, role_to_index
+from .vcon import DEFAULT_CONSENT_SCRIPT, VConBuilder, recording_key, role_to_index
 
 logger = logging.getLogger("vcon_agent.agent")
+
+# Environment variable names for the egress seam (bucket/region mirror
+# persistence.py; the LiveKit creds are the same ones the worker/plugins read).
+ENV_BUCKET_NAME = "BUCKET_NAME"
+ENV_AWS_REGION = "AWS_REGION"
+ENV_AWS_ACCESS_KEY_ID = "AWS_ACCESS_KEY_ID"
+ENV_AWS_SECRET_ACCESS_KEY = "AWS_SECRET_ACCESS_KEY"
+ENV_LIVEKIT_URL = "LIVEKIT_URL"
+ENV_LIVEKIT_API_KEY = "LIVEKIT_API_KEY"
+ENV_LIVEKIT_API_SECRET = "LIVEKIT_API_SECRET"
+
+
+def load_env() -> None:
+    """Load a local ``.env`` into ``os.environ`` early and cwd-independently.
+
+    The LiveKit worker reads ``LIVEKIT_URL`` / ``LIVEKIT_API_KEY`` /
+    ``LIVEKIT_API_SECRET`` to connect and REGISTER, which happens inside
+    ``cli.run_app(...)`` in :func:`main` -- *before* any job (so before
+    :func:`entrypoint`) ever runs. The ``.env`` must therefore be loaded before
+    the worker starts, not per-job, otherwise ``python -m vcon_agent.agent dev``
+    fails at registration with "ws_url is required, or set LIVEKIT_URL ...".
+
+    Resolution is cwd-independent so the process can be launched from any
+    directory: we first anchor to the project root relative to this file (the
+    repo root holds ``.env`` / ``.env.example``), then fall back to
+    :func:`find_dotenv`, which searches upward from the cwd. If neither finds a
+    file, ``load_dotenv`` is a harmless no-op and the agent still starts from the
+    real environment (container-injected vars, a parent shell, etc.).
+
+    We do NOT pass ``override=True``: variables already set in the real
+    environment take precedence over the local ``.env`` file.
+    """
+    # src/vcon_agent/agent.py -> repo root is three parents up.
+    project_root_env = Path(__file__).resolve().parents[2] / ".env"
+    if project_root_env.is_file():
+        load_dotenv(project_root_env)
+        return
+    # Fall back to searching upward from the current working directory.
+    load_dotenv(find_dotenv())
+
+
+# Load the local .env at import time so credentials are present no matter how the
+# module is reached (``python -m vcon_agent.agent`` or a direct import). This is
+# a no-op when no file exists and never overrides real-environment variables.
+load_env()
 
 # Roles that correspond to spoken dialog turns we record in the vCon. Other
 # ChatContext roles (``system``/``developer``) are prompt scaffolding, not call
@@ -96,6 +144,192 @@ def handle_item(builder: VConBuilder, role: str, text: str) -> bool:
     return True
 
 
+def build_egress_request(
+    room_name: str,
+    bucket: str,
+    region: Optional[str],
+    filepath: str,
+    access_key: Optional[str],
+    secret: Optional[str],
+) -> "api.StartEgressRequest":
+    """Build the unified LiveKit AUDIO egress request (pure helper).
+
+    LiveKit deprecated the five source-specific egress APIs (room-composite, web,
+    participant, track-composite, track) in favour of a single
+    :class:`api.StartEgressRequest` that takes one of three sources
+    (``template``/``web``/``media``). The like-for-like replacement for the old
+    "room-composite, audio-only, single mixed file" recording is a
+    :class:`api.TemplateSource` with ``audio_only=True`` -- that produces ONE
+    mixed audio file for the whole room, exactly as the room-composite path did.
+    (A ``media`` source would capture tracks directly and can emit per-track
+    output, which would change the single-recording.ogg output model, so it is
+    deliberately NOT used here. ``layout``/``custom_base_url`` are left unset on
+    the template because setting either forces the video pipeline.)
+
+    The OGG file output and its S3 upload are wired into the request's repeated
+    ``outputs`` list: a single :class:`api.Output` carrying an
+    :class:`api.FileOutput` (``file_type=OGG``, ``filepath=<recording key>``) and
+    a per-output :class:`api.StorageConfig` whose ``s3`` is the
+    :class:`api.S3Upload`. This is a pure value builder with no network call, so
+    tests can assert the request shape (audio-only, OGG, filepath, bucket/region)
+    without touching LiveKit.
+
+    Egress manifest: we intentionally leave ``FileOutput.disable_manifest`` at
+    its default (not set), so LiveKit Egress writes a sibling ``EG_<id>.json``
+    manifest next to ``recording.ogg``. That manifest is useful provenance -- it
+    carries the egress_id, started_at/ended_at timings, and the resolved
+    (https) object location -- so it is a deliberate keep, not an accident. Set
+    ``disable_manifest=True`` on the FileOutput if a cleaner bucket (only
+    recording.ogg) is preferred; the enrichment pipeline keys off recording.ogg
+    and can ignore the manifest either way.
+
+    SHORTCUT (acknowledged): audio only (no video) and plain SSE-S3 via the
+    S3Upload credentials (no CMK). Production would make audio/video configurable
+    per clinical workflow and use SSE-KMS with a customer-managed key.
+    """
+    return api.StartEgressRequest(
+        room_name=room_name,
+        template=api.TemplateSource(audio_only=True),
+        outputs=[
+            api.Output(
+                file=api.FileOutput(
+                    file_type=api.EncodedFileType.OGG,
+                    filepath=filepath,
+                    # disable_manifest left at its default (False) so the
+                    # EG_<id>.json provenance manifest is written alongside
+                    # recording.ogg. See the docstring for how to disable it.
+                ),
+                storage=api.StorageConfig(
+                    s3=api.S3Upload(
+                        bucket=bucket,
+                        region=region or "",
+                        access_key=access_key or "",
+                        secret=secret or "",
+                    ),
+                ),
+            )
+        ],
+    )
+
+
+def recording_url(bucket: str, key: str) -> str:
+    """Return the canonical ``s3://<bucket>/<key>`` url for the recording object.
+
+    This is the single source of the ``s3://`` form threaded into the vCon's
+    recording dialog. The vCon always carries this derived url (well defined from
+    the bucket and the per-run recording key): the enrichment pipeline runs
+    server-side with AWS SDK credentials, for which the ``s3://`` URI is the
+    natural identifier.
+    """
+    return f"s3://{bucket}/{key}"
+
+
+async def _default_start_egress(
+    url: str,
+    api_key: str,
+    api_secret: str,
+    request: "api.StartEgressRequest",
+) -> Any:
+    """Live egress start: the one place that talks to LiveKit over the network.
+
+    Uses the unified :meth:`egress.start_egress` endpoint (the replacement for
+    the deprecated ``start_room_composite_egress``). Kept behind the injectable
+    ``start_egress`` seam in :func:`entrypoint` so unit tests pass a fake and
+    never open a connection. This live path (real LiveKit/AWS) is NOT
+    automatically verifiable in the sandbox, consistent with the live voice path,
+    which also is not automatically verifiable.
+    """
+    client = api.LiveKitAPI(url, api_key, api_secret)
+    try:
+        return await client.egress.start_egress(request)
+    finally:
+        await client.aclose()
+
+
+async def _maybe_start_recording_egress(
+    builder: VConBuilder,
+    room_name: str,
+    session_start_iso: str,
+    *,
+    env: Optional[dict] = None,
+    start_egress: Optional[
+        Callable[[str, str, str, "api.StartEgressRequest"], Awaitable[Any]]
+    ] = None,
+) -> Optional[str]:
+    """Start the audio egress and thread the recording url into the vCon.
+
+    Reads config from ``env`` (defaults to ``os.environ``). If ``BUCKET_NAME`` or
+    the LiveKit creds are absent, egress is skipped gracefully (logged) so the
+    standalone local demo still runs -- mirroring persistence.py's env-optional
+    behavior. The whole live call is guarded so a failure never breaks the call.
+
+    The recording key is derived from the SAME ``(room_name, session_start_iso)``
+    pair used for the vCon flush, so ``recording.ogg`` and ``vcon-skeleton.json``
+    share the single-segment run prefix.
+
+    The vCon ALWAYS carries the canonical ``s3://<bucket>/<key>`` location
+    derived from the per-run recording key (via :func:`recording_url`). The
+    egress result is used ONLY for logging (``egress_id``); readiness is
+    poll-based (the enrichment pipeline polls S3 at that key), so we do not wait
+    for or prefer any egress-reported location. Returns the recording ``s3://``
+    url when a recording dialog was added, else ``None``.
+
+    ``start_egress`` is an injectable async callable (defaults to the live
+    :func:`_default_start_egress`) so tests drive a fake and stay fully offline.
+    """
+    if env is None:
+        env = os.environ
+    if start_egress is None:
+        start_egress = _default_start_egress
+
+    bucket = env.get(ENV_BUCKET_NAME)
+    lk_url = env.get(ENV_LIVEKIT_URL)
+    lk_key = env.get(ENV_LIVEKIT_API_KEY)
+    lk_secret = env.get(ENV_LIVEKIT_API_SECRET)
+
+    # Env-optional, like persistence.py: no bucket or no LiveKit creds -> skip
+    # egress (logged) and keep the standalone local demo working.
+    if not bucket or not lk_url or not lk_key or not lk_secret:
+        logger.info(
+            "egress skipped: BUCKET_NAME/LiveKit creds not fully configured "
+            "(standalone local demo mode)"
+        )
+        return None
+
+    # The vCon always carries the canonical s3:// url derived from the per-run
+    # recording key. The egress result is used only for logging (egress_id); the
+    # pipeline finds the object by polling S3 at this key.
+    key = recording_key(room_name, session_start_iso)
+    url = recording_url(bucket, key)
+    try:
+        request = build_egress_request(
+            room_name=room_name,
+            bucket=bucket,
+            region=env.get(ENV_AWS_REGION),
+            filepath=key,
+            access_key=env.get(ENV_AWS_ACCESS_KEY_ID),
+            secret=env.get(ENV_AWS_SECRET_ACCESS_KEY),
+        )
+        info = await start_egress(lk_url, lk_key, lk_secret, request)
+
+        # Log the egress_id for observability only; it does not alter the url.
+        egress_id = getattr(info, "egress_id", None)
+        logger.info(
+            "started audio egress (egress_id=%s) -> %s",
+            egress_id,
+            url,
+        )
+    except Exception:  # defensive: never break the call on an egress error
+        logger.exception("failed to start recording egress; continuing call")
+        # Still record the intended recording location on the vCon so the
+        # enrichment pipeline's S3 poll has a key to look for even if the start
+        # call hiccuped.
+
+    # Thread the recording location into the vCon as an external reference.
+    builder.add_recording_dialog(url)
+    return url
+
+
 async def entrypoint(ctx: JobContext) -> None:
     """LiveKit worker entrypoint: run one scripted intake call.
 
@@ -104,11 +338,14 @@ async def entrypoint(ctx: JobContext) -> None:
     item, and persists the finished vCon exactly once on session end.
     """
     # Config (LiveKit/Deepgram/ElevenLabs/LLM keys + optional AWS vars) is read
-    # from the process environment; load a local .env if present. Plugins and the
-    # worker read their credentials straight from os.environ -- no secrets here.
-    load_dotenv()
-
+    # from the process environment. The local .env is already loaded once, early
+    # (at import time and again in main() before the worker registers), so the
+    # plugins and this handler simply read their credentials from os.environ --
+    # no per-job .env load is needed here and no secrets are handled directly.
     room_name = ctx.room.name
+    # The single microsecond-precision run identity: shared between the recording
+    # egress key and the vCon flush so recording.ogg and vcon-skeleton.json land
+    # under the SAME run prefix for this call.
     session_start_iso = _utc_now_iso()
 
     # Build the unsigned vCon incrementally during the call and record consent
@@ -173,6 +410,28 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.add_shutdown_callback(_flush_vcon)
 
     await ctx.connect()
+
+    # Start the AUDIO egress now that the agent has joined (unified StartEgress
+    # with a TemplateSource(audio_only=True), one mixed file for the room). The
+    # recording.ogg key shares the single-segment run prefix with the vCon flush
+    # (same room/session_start pair), and the derived s3:// url is threaded into
+    # the vCon as a recording dialog object BEFORE the shutdown flush, so the
+    # persisted vCon carries the recording location. Egress is skipped gracefully
+    # when BUCKET_NAME/LiveKit creds are absent and guarded so it never breaks
+    # the call.
+    #
+    # NOT on the critical path: we deliberately do NOT drive processing from an
+    # ``egress_ended`` webhook/event. The enrichment pipeline polls S3 at the
+    # recording key for readiness instead, which sidesteps the duplicate / early
+    # / missing-webhook
+    # failure modes. A real deployment MAY still subscribe to egress status for
+    # logging/observability only, but that is never the trigger for enrichment.
+    await _maybe_start_recording_egress(
+        builder,
+        room_name,
+        session_start_iso,
+    )
+
     await session.start(
         agent=Agent(instructions=INTAKE_INSTRUCTIONS),
         room=ctx.room,
@@ -190,6 +449,11 @@ async def entrypoint(ctx: JobContext) -> None:
 
 def main() -> None:
     """Run the agent as a LiveKit worker (dev/console/start modes via the CLI)."""
+    # Ensure the local .env is loaded BEFORE cli.run_app(...) starts the worker:
+    # the worker reads LIVEKIT_URL/API_KEY/API_SECRET to connect and register
+    # before any job (entrypoint) runs. load_env() already ran at import, so this
+    # is an idempotent safety net and a no-op when the vars are present.
+    load_env()
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
 
 
