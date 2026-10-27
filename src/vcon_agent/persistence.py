@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .vcon import run_key
+from .vcon import execution_name, run_key
 
 # Environment variable names (map of CloudFormation Outputs -> local .env).
 ENV_BUCKET_NAME = "BUCKET_NAME"
@@ -146,9 +146,13 @@ def persist_vcon(
             if sfn_client is None:
                 sfn_client = _make_boto3_client("stepfunctions", region)
             # Envelope must match the enrichment pipeline, which unwraps exactly once
-            # with event.get("vcon", event).
+            # with event.get("vcon", event). The execution name is a deterministic
+            # idempotency key derived from (room_name, session_start_iso), so a
+            # retried StartExecution collapses into the original run instead of
+            # launching a duplicate pipeline.
             response = sfn_client.start_execution(
                 stateMachineArn=state_machine_arn,
+                name=execution_name(room_name, session_start_iso),
                 input=json.dumps({"vcon": vcon_doc}),
             )
             enrichment_triggered = True
