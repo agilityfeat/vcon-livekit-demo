@@ -391,10 +391,14 @@ Resources:
           # succeeded) OR starting the job fails, fall back to a canned transcript
           # so the pipeline is runnable without a real recording. The canned text
           # is carried on the envelope and the GetTranscription step returns it
-          # immediately. → Production: always start a real job (or use AWS
-          # HealthScribe for clinician-grade notes + transcript in one service).
+          # immediately. The fallback is now logged to CloudWatch and records a
+          # transcription_canned_reason on the envelope so the substitution is
+          # visible rather than silent. → Production: always start a real job (or
+          # use AWS HealthScribe for clinician-grade notes + transcript in one
+          # service).
           #
           # Unwrap convention: one event.get("vcon", event) yields the vCon doc.
+          import logging
           import os
           import time
 
@@ -415,6 +419,10 @@ Resources:
 
               job_name = "vcon-tm-{}".format(int(time.time() * 1000))
 
+              # Always populate a reason on the canned path so operators can tell
+              # a missing-recording fallback apart from a real start-job failure.
+              canned_reason = "no recording available"
+
               if ready and bucket and key:
                   try:
                       _TRANSCRIBE.start_medical_transcription_job(
@@ -431,9 +439,19 @@ Resources:
                           "job_name": job_name,
                           "canned": False,
                       }
-                  except Exception:
-                      # Fall through to the canned-transcript stub path.
-                      pass
+                  except Exception as exc:
+                      # Fail open to the canned-transcript stub path, but log the
+                      # caught exception to CloudWatch and record why we fell back
+                      # so the failure is visible instead of silent.
+                      logging.getLogger().exception(
+                          "start_medical_transcription_job failed; "
+                          "falling back to canned transcript"
+                      )
+                      canned_reason = (
+                          "start_medical_transcription_job failed: {}: {}".format(
+                              type(exc).__name__, exc
+                          )
+                      )
 
               # Canned-transcript stub path.
               return {
@@ -442,6 +460,7 @@ Resources:
                   "job_name": job_name,
                   "canned": True,
                   "canned_transcript": _CANNED_TRANSCRIPT,
+                  "transcription_canned_reason": canned_reason,
               }
       Tags:
         - Key: Project
@@ -598,6 +617,8 @@ Resources:
           # dialog turn index they are attributed to for provenance.
           #
           # Unwrap convention: one event.get("vcon", event) yields the vCon doc.
+          import logging
+
           import boto3
 
           _CM = boto3.client("comprehendmedical")
@@ -651,9 +672,12 @@ Resources:
                       resp = _CM.detect_entities_v2(Text=transcript_text)
                       entities = _extract_min_entities(resp)
                   except Exception as exc:
+                      logging.getLogger().exception(
+                          "comprehend-medical call failed"
+                      )
                       entities = []
-                      degraded = "comprehend-medical call failed: {}".format(
-                          type(exc).__name__
+                      degraded = "comprehend-medical call failed: {}: {}".format(
+                          type(exc).__name__, exc
                       )
 
               return {
@@ -699,6 +723,7 @@ Resources:
           #
           # Unwrap convention: one event.get("vcon", event) yields the vCon doc.
           import json
+          import logging
           import os
 
           import boto3
@@ -793,9 +818,10 @@ Resources:
                   payload = json.loads(resp["body"].read())
                   summary_text = _summary_text_from_bedrock_response(payload)
               except Exception as exc:
+                  logging.getLogger().exception("bedrock invoke_model failed")
                   summary_text = ""
-                  degraded = "bedrock invoke_model failed: {}".format(
-                      type(exc).__name__
+                  degraded = "bedrock invoke_model failed: {}: {}".format(
+                      type(exc).__name__, exc
                   )
 
               return {
