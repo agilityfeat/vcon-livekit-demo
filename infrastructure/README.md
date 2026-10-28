@@ -5,9 +5,14 @@ provisions the minimal AWS backend the vCon + LiveKit demo consumes. It deploys
 with one command, exposes the identifiers the local app needs as stack
 **Outputs**, and tears down cleanly.
 
-Everything lives in one template, Lambda code is inlined, and IAM is kept broad
-for readability. The shortcuts and their production counterparts
-are listed at the end.
+Most Lambda code is inlined, IAM is kept broad for readability, and the single
+exception is the **Seal** step, which is a packaged (container-built)
+`AWS::Serverless::Function` so it can ship its native `jwcrypto` / `cryptography`
+dependency and import the authoritative sealing core directly. The template now
+carries the SAM transform (`Transform: AWS::Serverless-2016-10-31`) for that one
+function, so it is deployed with AWS SAM (`sam build` + `sam deploy`) rather than
+a bare `aws cloudformation deploy`. The shortcuts and their production
+counterparts are listed at the end.
 
 **Why Step Functions over a single Lambda.** Transcribe Medical batch is an
 asynchronous job that can run longer than Lambda's hard 15-minute timeout. If a
@@ -27,7 +32,8 @@ ever sleeps past its timeout.
 | Resource | Purpose |
 |---|---|
 | **S3 bucket** (`AWS::S3::Bucket`) | Recordings from LiveKit Egress + skeleton / enriched / redacted vCon JSON. Versioning on, SSE-S3 default encryption, all public access blocked. |
-| **Lambda functions** (`AWS::Lambda::Function`) | The seven real pipeline steps invoked by the state machine, inline Python: `poll-recording-step` (poll S3 for the recording), `load-skeleton-step` (load the skeleton vCon), `start-transcription-step` (start the Transcribe Medical batch job), `get-transcription-step` (poll the job once), `comprehend-step` (Comprehend Medical meds + conditions), `bedrock-step` (physician summary), and `merge-step` (merge results into `analysis[]` with turn-index provenance). Each body mirrors the pure, offline-tested logic in `src/vcon_agent/enrichment.py` + `vcon.py` (inline code cannot import the repo package at AWS runtime). |
+| **Inline Lambda functions** (`AWS::Lambda::Function`) | The seven boto3-only pipeline steps invoked by the state machine, inline Python: `poll-recording-step` (poll S3 for the recording), `load-skeleton-step` (load the skeleton vCon), `start-transcription-step` (start the Transcribe Medical batch job), `get-transcription-step` (poll the job once), `comprehend-step` (Comprehend Medical meds + conditions), `bedrock-step` (physician summary), and `merge-step` (merge results into `analysis[]` with turn-index provenance). Each body mirrors the pure, offline-tested logic in `src/vcon_agent/enrichment.py` + `vcon.py` (inline code cannot import the repo package at AWS runtime). These seven import only `boto3`, which the Lambda runtime provides, so they need no build step. |
+| **Packaged Seal Lambda** (`AWS::Serverless::Function`) | The `seal-step`, wired after `merge-step`: it signs the enriched vCon (JWS), encrypts the full copy (JWE), and writes a redacted sibling, persisting the three objects to S3. Unlike the seven inline steps, this one is **not** inlined: it is a container-built SAM function (`CodeUri: functions/seal/`, `Handler: seal_handler.handler`, `Runtime: python3.12`, `Metadata.BuildMethod: python3.12`) that **imports the authoritative `src/vcon_agent/sealing.py`** (vendored into the package) instead of re-mirroring the crypto by hand. It depends on `jwcrypto` -> `cryptography`, which ships compiled native binaries, so it requires `sam build --use-container` (see Deploy below). |
 | **Step Functions state machine** (`AWS::StepFunctions::StateMachine`) | The enrichment orchestrator. Polls S3 for the recording, runs Transcribe Medical as an async batch whose completion the state machine awaits, then runs Comprehend Medical and Bedrock as a parallel branch, then merges into `analysis[]`. Invoked by the local app via a deterministic, idempotent `StartExecution`. |
 | **IAM roles** (`AWS::IAM::Role`) | A Step Functions execution role (invokes all seven pipeline Lambdas + writes execution logs) and a Lambda execution role granting access to Transcribe Medical, Comprehend Medical, Bedrock, S3, and CloudWatch Logs. |
 
@@ -127,20 +133,59 @@ summary) from a silent model failure. On a healthy run the key is absent, and
 `validate-live.sh` asserts that. Transcription, by contrast, fails CLOSED through
 the dedicated `TranscriptionFailed` state.
 
-## Deploy (one command)
+## Deploy (AWS SAM)
+
+Because the Seal step is now a packaged `AWS::Serverless::Function` and the
+template carries `Transform: AWS::Serverless-2016-10-31`, the stack is deployed
+with **AWS SAM** (`sam build` + `sam deploy`) instead of a bare
+`aws cloudformation deploy`.
+
+### Prerequisites
+
+- **AWS SAM CLI** -- installs the `sam` command used below. See the
+  [AWS SAM CLI install guide](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html).
+- **Docker** -- must be installed and running, because the Seal function is
+  built inside a Lambda build container (see "Why `--use-container`" below).
+
+### Why `--use-container` is required
+
+The Seal function depends on `jwcrypto`, which depends on `cryptography`, and
+`cryptography` ships **compiled native binaries** (a Rust/CFFI extension linked
+against OpenSSL). Those binaries must be built for the **Lambda execution
+environment** that the `SealFunction` runs in: Amazon Linux 2023, CPython 3.12,
+on `x86_64`. If you let SAM package your local-OS site-packages instead, the
+wheel compiled for your machine (for example macOS/arm64 or a different glibc)
+would **fail to import at Lambda runtime**. Passing `--use-container` makes
+`sam build` compile the correct native wheel inside the matching Lambda build
+image, so it imports cleanly once deployed.
+
+The other seven pipeline steps are inline Lambdas that import only `boto3`
+(provided by the runtime), so they need no build and are unaffected by this.
+
+### Build, then deploy
 
 ```bash
-aws cloudformation deploy \
-  --template-file infrastructure/template.yaml \
+# From the repository root, build the Seal function in the Lambda build container.
+sam build --use-container --template infrastructure/template.yaml
+
+# First deploy: --guided walks you through stack name, region, capabilities, and
+# parameter overrides, then saves them to samconfig.toml for next time.
+sam deploy --guided
+```
+
+On subsequent deploys the saved config lets you just run `sam deploy`, or you can
+pass everything explicitly:
+
+```bash
+sam deploy \
   --stack-name vcon-livekit-demo \
   --capabilities CAPABILITY_NAMED_IAM
 ```
 
-Optional parameter overrides:
+Optional parameter overrides (same parameters as before):
 
 ```bash
-aws cloudformation deploy \
-  --template-file infrastructure/template.yaml \
+sam deploy \
   --stack-name vcon-livekit-demo \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides ProjectName=vcon-livekit-demo Environment=dev BedrockModelId=global.anthropic.claude-haiku-5-5
@@ -149,6 +194,23 @@ aws cloudformation deploy \
 `BedrockModelId` must be a Bedrock inference-profile id (default
 `global.anthropic.claude-haiku-5-5`); override it to pin a different model or a
 geo profile such as `us.anthropic.claude-haiku-5-5`.
+
+### Sealing-core single source of truth
+
+`src/vcon_agent/sealing.py` is the **authoritative** pure crypto/redaction core,
+exercised by the offline pytest suite. The packaged Seal Lambda cannot import the
+repo package at AWS runtime, so a **byte-identical copy** lives at
+`infrastructure/functions/seal/sealing.py`, which `sam build` ships inside the
+function artifact. That copy is **generated**, never hand-edited: regenerate it
+whenever the source changes with
+
+```bash
+bash infrastructure/functions/seal/vendor.sh
+```
+
+A test (`tests/test_seal_pipeline_wiring.py::test_vendored_sealing_matches_source`)
+asserts the vendored copy is byte-identical to the source, so drift is caught if
+the regenerate step is ever forgotten.
 
 ## Read the Outputs into your local `.env`
 
@@ -328,30 +390,119 @@ summary and exits non-zero if any check failed. It verifies:
   `authoritative` and with **no `degraded` markers** on a healthy run. Note the
   canned input has **no real recording**, so the pipeline exercises the
   canned-transcript stub path on the live stack too.
+- the **Seal step ran**: it reads the execution output and asserts the Seal
+  result carries its redacted pointer, then inspects the Seal step's
+  `seal_keys`. When `seal_keys` is non-empty (a run with a real `recording_key`,
+  see below), it `head-object`s each of the three Seal siblings
+  (`vcon-signed.jws`, `vcon-full.jwe`, `vcon-redacted.json`) and PASS/FAILs per
+  object. When `seal_keys` is empty (the expected case for the **canned**
+  no-recording run, which derives no run-key prefix and therefore writes no Seal
+  siblings), it records that the canned path writes no siblings and notes that
+  confirming the physical S3 siblings requires a run with a real
+  `recording_key`.
+
+### The three Seal siblings and when they are written
+
+The Seal step derives the run-key prefix from `event['recording_key']` (via
+`rsplit('/', 1)[0]`) and writes three objects next to the skeleton vCon:
+
+```
+<room_name>/<session_start_iso>/vcon-signed.jws      (application/vcon+jws)
+<room_name>/<session_start_iso>/vcon-full.jwe        (application/jose)
+<room_name>/<session_start_iso>/vcon-redacted.json   (application/json)
+```
+
+Its output dict carries `seal_keys` (`{signed_key, full_key, redacted_key}`)
+when those PUTs happened, and an empty `seal_keys` dict when there was no bucket
+and prefix to write to. The redacted pointer url is
+`s3://<bucket>/<full_key>`. Because the canned validation input has **no**
+`recording_key`, the Seal step derives no prefix and writes **no** siblings on
+that run, so `validate-live.sh` only head-objects the three siblings when a run
+actually produced them. To exercise and confirm the physical siblings, run the
+agent against a real recording (so the skeleton carries a `recording` dialog
+object and the pipeline threads a real `recording_key` through to Seal).
+
+### Full local end-to-end sequence (Docker + AWS creds)
+
+With Docker running and real AWS credentials configured, the complete live path
+from a clean checkout is:
+
+```bash
+# 1. Install the AWS SAM CLI (one time). See the install guide linked above.
+
+# 2. Build the Seal function in the Lambda build container (Docker required).
+sam build --use-container --template infrastructure/template.yaml
+
+# 3. Deploy the stack (first time: --guided; afterwards: the explicit form).
+sam deploy \
+  --stack-name vcon-livekit-demo \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides ProjectName=vcon-livekit-demo Environment=dev BedrockModelId=global.anthropic.claude-haiku-5-5
+
+# 4. Read the stack Outputs (BucketName / StateMachineArn / Region) into .env.
+cp .env.example .env     # at the repository root
+aws cloudformation describe-stacks \
+  --stack-name vcon-livekit-demo \
+  --query "Stacks[0].Outputs" \
+  --output table
+# then paste BucketName -> BUCKET_NAME, StateMachineArn -> STATE_MACHINE_ARN,
+# Region -> AWS_REGION into .env (see the Outputs mapping table above).
+
+# 5. Produce a vCon: either run the agent against a real call (which records to
+#    S3 and threads a real recording_key, producing the three Seal siblings) ...
+python -m vcon_agent.agent dev
+#    ... or start a canned execution by hand (reaches Merge + Seal, but writes
+#    NO Seal siblings because the canned input has no recording_key):
+aws stepfunctions start-execution \
+  --state-machine-arn "$STATE_MACHINE_ARN" \
+  --input '{"vcon": {"vcon": "0.0.1", "uuid": "00000000-0000-0000-0000-000000000000", "subject": "demo call", "parties": [{"name": "Agent"}, {"name": "Caller"}], "dialog": [], "analysis": []}}'
+
+# 6. Confirm the pipeline + Seal end to end.
+AWS_PROFILE=<profile> ./infrastructure/scripts/validate-live.sh
+```
+
+A run with a **real `recording_key`** (step 5, via the agent) is what produces
+the three physical Seal siblings in S3; only then will `validate-live.sh`
+head-object and PASS them. A canned-only run still confirms the Seal state ran
+and carried its redacted pointer.
 
 ### What can be validated offline vs. what needs live AWS
 
-- **Validated offline:** `cfn-lint infrastructure/template.yaml` reports **zero
-  errors** (and zero warnings), each inline Lambda body compiles cleanly
-  (`python3 -m py_compile`), and the correctness-critical logic the inline
-  bodies mirror (`src/vcon_agent/enrichment.py` + `vcon.py`) is exercised by the
-  offline pytest suite (`python3 -m pytest tests/ -q`).
-- **Requires live AWS credentials:** `aws cloudformation deploy`,
-  `aws stepfunctions start-execution`, `aws cloudformation describe-stacks`, and
-  `aws cloudformation delete-stack`. These are documented above and should be run
-  against a real account. `aws cloudformation validate-template` also calls the
-  AWS API and therefore needs credentials.
+The template now carries a SAM transform (`Transform: AWS::Serverless-2016-10-31`)
+for the packaged Seal function, so the offline checks include a SAM-aware lint.
+
+- **Validated offline:** the full pytest suite is green
+  (`python3 -m pytest tests/ -q`, which exercises the correctness-critical
+  `src/vcon_agent/{enrichment,vcon,sealing}.py` core and the packaged
+  `seal_handler` with fakes); `cfn-lint infrastructure/template.yaml` reports
+  **zero errors**; and `sam validate --lint --template infrastructure/template.yaml`
+  confirms the SAM template is valid. Each remaining inline Lambda body also
+  compiles cleanly (`python3 -m py_compile`).
+- **Requires live AWS credentials (and Docker):** `sam build --use-container`
+  (compiles the Seal function's native `cryptography` wheel for the Lambda
+  runtime), `sam deploy` (replaces the old `aws cloudformation deploy`), running
+  the agent to produce a vCon, and `./infrastructure/scripts/validate-live.sh`.
+  The underlying `aws stepfunctions start-execution`,
+  `aws cloudformation describe-stacks`, and `aws cloudformation delete-stack`
+  calls likewise need a real account. These are documented above and should be
+  run against a real account.
 
 ## Shortcuts (demo) vs. production
 
 - 🩹 **Broad-ish IAM** (service-level actions, a single shared Lambda role,
   single bucket) for readability. → *Production:* least-privilege per
   action/resource, condition keys, a separate role per Lambda.
-- 🩹 **Inline Lambda code** deployed with the template, restating the pure
-  `enrichment.py` / `vcon.py` logic because inline code cannot import the repo
-  package at AWS runtime. → *Production:* CI/CD, versioned artifacts in S3/ECR, a
-  shared layer/package instead of copy-pasted logic, separate infra vs. app
-  pipelines.
+- 🩹 **Inline Lambda code for seven of the eight steps**, deployed with the
+  template, restating the pure `enrichment.py` / `vcon.py` logic because inline
+  code cannot import the repo package at AWS runtime. The **Seal** step is the
+  exception: it is a packaged (container-built) `AWS::Serverless::Function` that
+  imports the authoritative `src/vcon_agent/sealing.py` (vendored into the
+  package), so its crypto is **not** hand-mirrored. It is packaged rather than
+  inlined because its `jwcrypto` / `cryptography` dependency ships native
+  binaries that cannot be inlined and must be compiled for the Lambda runtime
+  (hence `sam build --use-container`). → *Production:* CI/CD, versioned artifacts
+  in S3/ECR, a shared layer/package for all steps instead of copy-pasted logic,
+  separate infra vs. app pipelines.
 - 🩹 **The transcription wait has no stall guard.** The state machine polls the
   Transcribe Medical job on a fixed interval and waits as long as the real job
   takes -- correct for long conversations -- but a job that hangs, vanishes, or

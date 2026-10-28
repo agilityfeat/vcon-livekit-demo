@@ -410,8 +410,9 @@ Signing, encryption, and redaction all happen in the **enrichment pipeline**
 after the merge step, never in the agent process. This keeps the team's "no AWS
 in the agent process" design note intact: the agent's only AWS touchpoint stays
 the single S3 PUT of the skeleton vCon. The redaction step's AWS Comprehend
-Medical `DetectPHI` pass is likewise confined to the inline Lambda; the pure core
-in `sealing.py` never calls AWS and instead accepts an injected `detect_phi`
+Medical `DetectPHI` pass is likewise confined to the packaged Seal Lambda's glue;
+the pure core in `sealing.py` never calls AWS and instead accepts an injected
+`detect_phi`
 callable (or pre-computed `phi_spans`), so it stays fully offline-testable with
 canned spans.
 

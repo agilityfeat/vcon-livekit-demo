@@ -265,7 +265,8 @@ else
   else
     # Assert the output preserves top-level "vcon": "0.0.1" and contains the
     # three analysis entries in order: transcript, entities, summary. The Merge
-    # step writes them in that deterministic order. Use python3 for robust JSON
+    # step writes them in that deterministic order and the terminal Seal step
+    # carries the same "vcon" through on its output. Use python3 for robust JSON
     # parsing (avoids a hard jq dependency).
     if printf '%s' "${EXEC_OUTPUT}" | python3 -c '
 import json
@@ -273,8 +274,9 @@ import sys
 
 data = json.load(sys.stdin)
 
-# The Merge step returns {"vcon": <doc>, "step": "merge", "status": "ok"}, so
-# one unwrap yields the enriched vCon document.
+# Seal is the terminal state, returning
+# {"vcon": <doc>, "step": "seal", "status": "ok", "redacted": ..., ...}, so one
+# unwrap of "vcon" yields the enriched vCon document (Merge threaded it through).
 vcon = data.get("vcon", data)
 
 version = vcon.get("vcon")
@@ -307,6 +309,89 @@ for a in vcon.get("analysis", []):
       pass 'execution output preserves "vcon": "0.0.1" and has analysis [transcript, entities, summary] in order (transcript authoritative, no degraded markers)'
     else
       fail 'execution output did not match: expected "vcon": "0.0.1" and analysis [transcript, entities, summary]'
+    fi
+
+    # -----------------------------------------------------------------------
+    # SEAL STEP: the terminal Seal state signs (JWS), encrypts (JWE), and
+    # redacts the enriched vCon, then PUTs three siblings under the run-key
+    # prefix: vcon-signed.jws / vcon-full.jwe / vcon-redacted.json. Its output
+    # is {vcon, step: 'seal', status: 'ok', redacted, seal_keys, seal_degraded}.
+    #
+    # First assert the Seal state RAN: the terminal output must be step 'seal'
+    # and must carry the redacted pointer (redacted.redacted). Then inspect
+    # seal_keys:
+    #   * seal_keys NON-EMPTY -> a run with a real recording_key wrote the three
+    #     siblings; head-object each key and PASS/FAIL per object.
+    #   * seal_keys EMPTY     -> the canned no-recording input derives NO run-key
+    #     prefix, so the Seal step writes NO siblings. That is expected here; we
+    #     record it (not a failure) and note that confirming the physical S3
+    #     siblings requires a run with a real recording_key.
+    #
+    # We do NOT fabricate a PASS for objects a canned run never writes. Keys are
+    # printed one-per-line (signed_key, full_key, redacted_key) for head-object;
+    # the first line is a STATUS token: SEAL_OK (ran + redacted pointer present),
+    # SEAL_NO_POINTER (ran but no redacted pointer), or SEAL_NOT_RUN.
+    # -----------------------------------------------------------------------
+    SEAL_PARSED="$(printf '%s' "${EXEC_OUTPUT}" | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+
+if data.get("step") != "seal":
+    print("SEAL_NOT_RUN")
+    sys.exit(0)
+
+redacted = data.get("redacted") or {}
+pointer = isinstance(redacted, dict) and isinstance(redacted.get("redacted"), dict)
+print("SEAL_OK" if pointer else "SEAL_NO_POINTER")
+
+seal_keys = data.get("seal_keys") or {}
+for name in ("signed_key", "full_key", "redacted_key"):
+    key = seal_keys.get(name)
+    if key:
+        print(key)
+' 2>/dev/null || echo "SEAL_PARSE_ERROR")"
+
+    SEAL_STATUS="$(printf '%s\n' "${SEAL_PARSED}" | head -n 1)"
+    # Lines 2+ are the seal object keys (empty for the canned no-recording run).
+    SEAL_KEYS="$(printf '%s\n' "${SEAL_PARSED}" | tail -n +2 | sed '/^$/d')"
+
+    case "${SEAL_STATUS}" in
+    SEAL_OK)
+      pass "Seal step ran and carried its redacted pointer (output step=seal, redacted present)"
+      ;;
+    SEAL_NO_POINTER)
+      fail "Seal step ran but its output carried no redacted pointer (expected redacted.redacted)"
+      ;;
+    SEAL_NOT_RUN)
+      fail "terminal execution output is not the Seal step (expected step=seal); Seal may not have run"
+      ;;
+    *)
+      fail "could not parse the Seal step output JSON"
+      ;;
+    esac
+
+    if [[ -n "${SEAL_KEYS}" ]]; then
+      # A run with a real recording_key wrote the three siblings: head-object
+      # each key under the bucket and PASS/FAIL per object.
+      while IFS= read -r SEAL_KEY; do
+        [[ -z "${SEAL_KEY}" ]] && continue
+        if aws s3api head-object \
+          --bucket "${BUCKET_NAME}" \
+          --key "${SEAL_KEY}" \
+          "${REGION_ARG[@]}" >/dev/null 2>&1; then
+          pass "Seal sibling present in S3: ${SEAL_KEY}"
+        else
+          fail "Seal sibling missing in S3: ${SEAL_KEY}"
+        fi
+      done <<< "${SEAL_KEYS}"
+    else
+      # Expected for the canned run: no recording_key -> no run-key prefix ->
+      # seal_keys empty -> no physical siblings written. Not a failure; record
+      # it and note what a real-recording run is needed to confirm.
+      pass "Seal wrote no S3 siblings on the canned run (no recording_key -> empty seal_keys, as expected)"
+      echo "NOTE: confirming the physical Seal siblings (vcon-signed.jws / vcon-full.jwe / vcon-redacted.json) requires a run with a REAL recording_key (run the agent against a recording); the canned no-recording input writes none."
     fi
   fi
 fi
