@@ -337,8 +337,14 @@ inline Lambda body. The live end-to-end check is
   the execution name. → *Production:* a stable server-assigned call/session id
   (not a client-chosen room name), and a dedicated idempotency store if volume
   demands it.
-- 🩹 **Short / sample audio** so the batch job finishes fast. → *Production:*
-  real long-form audio; the async pattern is already correct for it.
+- 🩹 **The transcription wait has no stall guard.** The state machine polls the
+  Transcribe Medical job on a fixed interval and waits as long as the real job
+  takes -- correct for long conversations -- but a job that hangs, vanishes, or
+  errors persistently would poll indefinitely (a persistent `GetTranscription`
+  error currently looks identical to "in progress"). A genuinely `FAILED` job is
+  already handled. → *Production:* stall/liveness detection (bounded
+  non-progressing polls) plus retry-on-transient-error and a `Catch` to a visible
+  failure state, while a healthy long job keeps waiting.
 - 🩹 **Optional canned-transcript stub** so the pipeline is runnable without a
   real recording. → *Production:* the real job, or AWS HealthScribe for
   clinician-grade notes + transcript in one service.

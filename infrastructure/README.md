@@ -285,9 +285,14 @@ summary and exits non-zero if any check failed. It verifies:
   package at AWS runtime. → *Production:* CI/CD, versioned artifacts in S3/ECR, a
   shared layer/package instead of copy-pasted logic, separate infra vs. app
   pipelines.
-- 🩹 **Short / sample audio** so the Transcribe Medical batch finishes fast and
-  the reader sees the async pattern without a long wait. → *Production:* real
-  long-form audio; the async wait/poll/catch pattern is already correct for it.
+- 🩹 **The transcription wait has no stall guard.** The state machine polls the
+  Transcribe Medical job on a fixed interval and waits as long as the real job
+  takes -- correct for long conversations -- but a job that hangs, vanishes, or
+  errors persistently would poll indefinitely (a persistent `GetTranscription`
+  error currently looks identical to "in progress"). A genuinely `FAILED` job is
+  already handled. → *Production:* stall/liveness detection (bounded
+  non-progressing polls) plus retry-on-transient-error and a `Catch` to a visible
+  failure state, while a healthy long job keeps waiting.
 - 🩹 **Optional canned-transcript stub**: if there is no real recording (or
   starting the job fails), `start-transcription-step` falls back to a canned
   transcript so the pipeline is runnable end to end without a recording. →
