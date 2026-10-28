@@ -9,6 +9,7 @@ from vcon_agent.vcon import (
     PATIENT_INDEX,
     VCON_VERSION,
     VConBuilder,
+    execution_name,
     recording_key,
     role_to_index,
     run_key,
@@ -213,3 +214,160 @@ def test_add_recording_dialog_appends_after_turns():
 
     dialog = builder.to_dict()["dialog"]
     assert [d["type"] for d in dialog] == ["text", "recording"]
+
+
+# ----------------------------------------------------------------------------
+# execution_name: deterministic, idempotent Step Functions execution name
+# ----------------------------------------------------------------------------
+
+_ALLOWED_EXEC_CHARS = set(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+)
+
+
+def test_execution_name_is_deterministic_for_same_inputs():
+    a = execution_name("room-xyz", "2024-01-01T00:00:00.123+00:00")
+    b = execution_name("room-xyz", "2024-01-01T00:00:00.123+00:00")
+    assert a == b
+
+
+def test_execution_name_differs_for_different_inputs():
+    base = execution_name("room-xyz", "2024-01-01T00:00:00+00:00")
+    # Different session start -> different name.
+    assert base != execution_name("room-xyz", "2024-01-01T00:00:01+00:00")
+    # Different room -> different name.
+    assert base != execution_name("room-abc", "2024-01-01T00:00:00+00:00")
+
+
+def test_execution_name_charset_and_length():
+    # The raw ISO string carries ':' and '.', which are NOT allowed in a Step
+    # Functions execution name; the derived name must strip them.
+    name = execution_name("room-xyz", "2024-01-01T00:00:00.999+00:00")
+    assert len(name) <= 80
+    assert ":" not in name
+    assert "." not in name
+    assert name  # non-empty
+    assert set(name) <= _ALLOWED_EXEC_CHARS
+
+
+def test_execution_name_sanitizes_disallowed_prefix_chars():
+    # A room name full of disallowed characters must still yield a valid name.
+    name = execution_name("room:with/bad.chars", "2024-01-01T00:00:00+00:00")
+    assert len(name) <= 80
+    assert set(name) <= _ALLOWED_EXEC_CHARS
+    assert ":" not in name and "." not in name and "/" not in name
+
+
+def test_execution_name_long_room_is_truncated_but_unique():
+    long_room = "r" * 200
+    name = execution_name(long_room, "2024-01-01T00:00:00+00:00")
+    assert len(name) <= 80
+    # Distinct session start still yields a distinct name despite truncation,
+    # because the hash is over the full key not the truncated prefix.
+    other = execution_name(long_room, "2024-01-01T00:00:01+00:00")
+    assert name != other
+    assert len(other) <= 80
+
+
+def test_execution_name_empty_room_falls_back_to_hash():
+    name = execution_name("", "2024-01-01T00:00:00+00:00")
+    assert name
+    assert set(name) <= _ALLOWED_EXEC_CHARS
+    assert len(name) <= 80
+
+
+# ----------------------------------------------------------------------------
+# Analysis helpers: transcript / entities / summary with turn-index provenance
+# ----------------------------------------------------------------------------
+
+
+def test_add_transcript_analysis_authoritative_with_provenance():
+    builder = VConBuilder()
+    entry = builder.add_transcript_analysis(
+        "Patient reports a headache for two days.",
+        dialog_indices=[0, 2],
+    )
+    doc = builder.to_dict()
+
+    assert len(doc["analysis"]) == 1
+    assert doc["analysis"][0] is entry
+    assert entry["type"] == "transcript"
+    assert entry["vendor"] == "aws-transcribe-medical"
+    # Marked authoritative so it sits alongside the live Deepgram transcript.
+    assert entry["authoritative"] is True
+    # Turn-index provenance references the covered dialog turns.
+    assert entry["dialog"] == [0, 2]
+    assert entry["body"] == "Patient reports a headache for two days."
+
+
+def test_add_transcript_analysis_can_be_non_authoritative():
+    builder = VConBuilder()
+    entry = builder.add_transcript_analysis(
+        "live stt text", dialog_indices=[0], vendor="deepgram", authoritative=False
+    )
+    assert entry["vendor"] == "deepgram"
+    assert entry["authoritative"] is False
+
+
+def test_add_entities_analysis_meds_and_conditions_with_turn_ref():
+    builder = VConBuilder()
+    entities = [
+        {"category": "MEDICATION", "text": "ibuprofen", "score": 0.99},
+        {"category": "MEDICAL_CONDITION", "text": "headache", "score": 0.98},
+    ]
+    entry = builder.add_entities_analysis(entities, dialog_index=3)
+
+    assert entry["type"] == "entities"
+    assert entry["vendor"] == "aws-comprehend-medical"
+    # Provenance references the single dialog turn these entities came from.
+    assert entry["dialog"] == [3]
+    assert [e["category"] for e in entry["body"]] == [
+        "MEDICATION",
+        "MEDICAL_CONDITION",
+    ]
+    assert entry["body"][0]["text"] == "ibuprofen"
+    # Healthy path: no degraded marker.
+    assert "degraded" not in entry
+
+
+def test_add_entities_analysis_carries_degraded_marker_when_set():
+    builder = VConBuilder()
+    entry = builder.add_entities_analysis(
+        [], dialog_index=0, degraded="comprehend-medical call failed: AccessDenied"
+    )
+    # An empty body paired with a degraded marker is distinguishable from a real
+    # empty result (which omits the key).
+    assert entry["body"] == []
+    assert entry["degraded"] == "comprehend-medical call failed: AccessDenied"
+
+
+def test_add_summary_analysis_with_provenance():
+    builder = VConBuilder()
+    entry = builder.add_summary_analysis(
+        "Patient presents with a two-day headache; takes ibuprofen.",
+        dialog_indices=[0, 1, 2, 3],
+    )
+    assert entry["type"] == "summary"
+    assert entry["vendor"] == "aws-bedrock"
+    assert entry["dialog"] == [0, 1, 2, 3]
+    assert "headache" in entry["body"]
+    # Healthy path: no degraded marker.
+    assert "degraded" not in entry
+
+
+def test_add_summary_analysis_carries_degraded_marker_when_set():
+    builder = VConBuilder()
+    entry = builder.add_summary_analysis(
+        "", dialog_indices=[0], degraded="bedrock invoke_model failed: ThrottlingException"
+    )
+    assert entry["body"] == ""
+    assert entry["degraded"] == "bedrock invoke_model failed: ThrottlingException"
+
+
+def test_analysis_helpers_append_in_order():
+    builder = VConBuilder()
+    builder.add_transcript_analysis("t", dialog_indices=[0])
+    builder.add_entities_analysis([{"category": "MEDICATION", "text": "x"}], 0)
+    builder.add_summary_analysis("s", dialog_indices=[0])
+    types = [a["type"] for a in builder.to_dict()["analysis"]]
+    assert types == ["transcript", "entities", "summary"]

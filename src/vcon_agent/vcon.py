@@ -26,9 +26,11 @@ downstream enrichment can hang provenance off the party index.
 
 from __future__ import annotations
 
+import hashlib
+import re
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 # vCon specification version consumed by the enrichment pipeline.
 VCON_VERSION = "0.0.1"
@@ -40,6 +42,21 @@ AGENT_INDEX = 1
 
 # Default subject for the scripted patient-intake call.
 DEFAULT_SUBJECT = "Patient intake call"
+
+# Step Functions execution-name constraints (see the StartExecution API docs):
+# the name must be 1..80 characters and is restricted to a safe charset. We
+# allow letters, digits, hyphen, and underscore only, which is a strict subset
+# of what the API accepts, so any name we build is always valid. The raw
+# session_start_iso carries ':' and '.' (e.g. '2024-01-01T00:00:00.123+00:00')
+# which are NOT in this charset, hence the sanitize-and-hash below.
+_EXECUTION_NAME_MAX_LEN = 80
+# Characters NOT in [A-Za-z0-9_-] get collapsed to a single '-' in the readable
+# prefix. The full key is still hashed so distinctness never depends on the
+# (lossy) sanitized prefix.
+_EXECUTION_NAME_DISALLOWED = re.compile(r"[^A-Za-z0-9_-]+")
+# Length of the sha256 hex digest suffix kept for uniqueness. 16 hex chars
+# (64 bits) is ample collision resistance for one clinic's call volume.
+_EXECUTION_NAME_HASH_LEN = 16
 
 # Hardcoded consent script (acknowledged shortcut). Production would use a
 # versioned consent text, bind it to an authenticated identity, and scope it to
@@ -112,6 +129,51 @@ def recording_key(room_name: str, session_start_iso: str) -> str:
     vcon-skeleton.json).
     """
     return f"{room_name}/{session_start_iso}/recording.ogg"
+
+
+def execution_name(room_name: str, session_start_iso: str) -> str:
+    """Build a deterministic, idempotent Step Functions execution name.
+
+    The local agent triggers enrichment by calling ``StartExecution`` directly
+    (no webhook on the critical path). To make a RETRIED start a no-op rather
+    than a duplicate pipeline run, the execution name is derived DETERMINISTICALLY
+    from the idempotency key ``room_name + '|' + session_start_iso``: the same
+    inputs always produce the same name, and Step Functions rejects a second
+    ``StartExecution`` with an already-used name, so the retry collapses into the
+    original run.
+
+    The returned name always satisfies the StartExecution constraints: it is
+    1..80 characters and contains only ``[A-Za-z0-9_-]`` (so it never carries the
+    ':' or '.' that appear in the raw ISO ``session_start_iso``). It is built as
+    a readable sanitized room-name prefix plus a short sha256 hash of the FULL
+    key, joined with '-'. Distinctness is guaranteed by the hash of the full key,
+    not by the (lossy) sanitized prefix, so two rooms that sanitize to the same
+    prefix still get different names.
+
+    🩹 Shortcut: the idempotency key is just ``room_name + session start``, and
+    uniqueness rides on a truncated sha256. → Production: derive the key from a
+    stable, server-assigned call/session id (not a client-chosen room name), and
+    consider the full digest or a dedicated idempotency store if call volume ever
+    makes a 64-bit truncation uncomfortable.
+    """
+    key = f"{room_name}|{session_start_iso}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:_EXECUTION_NAME_HASH_LEN]
+
+    # Readable prefix: sanitize the room name to the allowed charset and trim any
+    # leading/trailing hyphens left by the collapse so the join stays tidy.
+    prefix = _EXECUTION_NAME_DISALLOWED.sub("-", room_name).strip("-")
+
+    # Reserve room for the '-' separator and the fixed-length hash suffix so the
+    # whole string is guaranteed <= 80 characters.
+    max_prefix_len = _EXECUTION_NAME_MAX_LEN - _EXECUTION_NAME_HASH_LEN - 1
+    if len(prefix) > max_prefix_len:
+        prefix = prefix[:max_prefix_len].strip("-")
+
+    if not prefix:
+        # Degenerate room name (empty or all-disallowed): the hash alone is a
+        # valid, deterministic name.
+        return digest
+    return f"{prefix}-{digest}"
 
 
 class VConBuilder:
@@ -267,6 +329,127 @@ class VConBuilder:
         if filename is not None:
             entry["filename"] = filename
         self._doc["dialog"].append(entry)
+        return entry
+
+    def add_transcript_analysis(
+        self,
+        transcript_text: str,
+        dialog_indices: Sequence[int],
+        vendor: str = "aws-transcribe-medical",
+        authoritative: bool = True,
+    ) -> Dict[str, Any]:
+        """Append a 'transcript' analysis object with turn-index provenance.
+
+        This is the CLINICAL transcript produced by Transcribe Medical. It is
+        stored as an ``analysis[]`` entry (not a new dialog turn) that REFERENCES
+        the dialog turn indices it covers via ``dialog``, so it sits ALONGSIDE
+        the live Deepgram transcript already in ``dialog[]`` rather than replacing
+        it. The two producers serve different needs (latency-tuned live STT vs.
+        clinically accurate batch transcription); keeping both with provenance is
+        the concrete payoff of the dual-transcript design, and vCon models it
+        natively. The clinical copy is marked ``authoritative`` so downstream
+        consumers know which transcript to trust for clinical use.
+
+        🩹 Shortcut: provenance is a flat list of dialog turn indices mapped by
+        timestamp overlap (see enrichment.map_turns_by_timestamp_overlap).
+        → Production: robust alignment between the diarized medical transcript and
+        the live turns (word-level timing, speaker reconciliation).
+        """
+        entry: Dict[str, Any] = {
+            "type": "transcript",
+            "vendor": vendor,
+            "authoritative": bool(authoritative),
+            # Turn-index provenance: which dialog turns this transcript covers.
+            "dialog": [int(i) for i in dialog_indices],
+            "body": transcript_text,
+            "mimetype": "text/plain",
+        }
+        self._doc["analysis"].append(entry)
+        return entry
+
+    def add_entities_analysis(
+        self,
+        entities: Sequence[Dict[str, Any]],
+        dialog_index: int,
+        vendor: str = "aws-comprehend-medical",
+        degraded: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Append an 'entities' analysis object scoped to one dialog turn.
+
+        Comprehend Medical extracts clinical entities from a single dialog turn;
+        the resulting entity list is stored as an ``analysis[]`` entry that
+        references that turn via ``dialog`` (a single turn index) for provenance.
+        Each entity carries at least ``category`` and ``text`` (and ``score`` when
+        the shaper kept it). The whole vCon still references parties/turns by
+        index, never embedded identities.
+
+        When the Comprehend step fails open (model access denied, throttling)
+        it passes a ``degraded`` reason string; it is attached to the entry so a
+        consumer can distinguish a real empty entity list from a silent failure.
+        A ``None`` reason omits the key entirely (the healthy case).
+
+        🩹 Shortcut: the entity set is kept minimal to meds + conditions
+        (MEDICATION + MEDICAL_CONDITION), shaped by
+        enrichment.extract_min_entities. → Production: the full Comprehend Medical
+        entity set with RxNorm / ICD-10-CM linking and confidence thresholds.
+
+        🩹 Shortcut: a failed analysis fails OPEN to an empty list with a
+        ``degraded`` marker so the demo pipeline still finishes. → Production: a
+        Catch to a visible alarm state plus retries, so an operator is paged
+        rather than reading a silently empty result.
+        """
+        entry: Dict[str, Any] = {
+            "type": "entities",
+            "vendor": vendor,
+            # Turn-index provenance: the single dialog turn these entities came
+            # from. Kept as a one-element list so every analysis entry exposes
+            # provenance under the same ``dialog`` key.
+            "dialog": [int(dialog_index)],
+            "body": [dict(e) for e in entities],
+        }
+        if degraded:
+            entry["degraded"] = degraded
+        self._doc["analysis"].append(entry)
+        return entry
+
+    def add_summary_analysis(
+        self,
+        summary_text: str,
+        dialog_indices: Sequence[int],
+        vendor: str = "aws-bedrock",
+        degraded: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Append a 'summary' analysis object with turn-index provenance.
+
+        Bedrock produces a physician-facing summary of the call. It is stored as
+        an ``analysis[]`` entry that references the dialog turn indices it was
+        built from via ``dialog`` so the summary is traceable back to the exact
+        turns it summarizes.
+
+        When the Bedrock step fails open (model not enabled, throttled) it passes
+        a ``degraded`` reason string; it is attached to the entry so a consumer
+        can distinguish an intentionally empty summary from a silent failure. A
+        ``None`` reason omits the key entirely (the healthy case).
+
+        🩹 Shortcut: a single free-text summary over the whole dialog.
+        → Production: structured clinical note sections (HPI, assessment, plan)
+        with per-section provenance and model/version pinning.
+
+        🩹 Shortcut: a failed call fails OPEN to an empty summary with a
+        ``degraded`` marker so the demo pipeline still finishes. → Production: a
+        Catch to a visible alarm state plus retries, so an operator is paged
+        rather than reading a silently empty result.
+        """
+        entry: Dict[str, Any] = {
+            "type": "summary",
+            "vendor": vendor,
+            "dialog": [int(i) for i in dialog_indices],
+            "body": summary_text,
+            "mimetype": "text/plain",
+        }
+        if degraded:
+            entry["degraded"] = degraded
+        self._doc["analysis"].append(entry)
         return entry
 
     def to_dict(self) -> Dict[str, Any]:
