@@ -36,24 +36,71 @@ ever sleeps past its timeout.
 - **Transcribe Medical, Comprehend Medical, Bedrock** — these are managed
   services you *call*, not resources you create. The template only grants IAM
   permission to use them.
-- **Bedrock model access** — a per-model **console opt-in**, not a
-  CloudFormation resource. See the manual prerequisite below.
+- **Bedrock model access** -- a one-time, account-level enablement (for
+  Anthropic, a first-time-use agreement), not a CloudFormation resource. See the
+  manual prerequisite below.
 - **No EventBridge / webhook endpoint** — enrichment is triggered by the local
   app via `StartExecution`, so no inbound event plumbing is needed.
 - **No compute for the agent** (no ECS / EC2 / Fargate) — the agent runs
   locally.
 
-## Manual prerequisite: enable Bedrock model access
+## Manual prerequisite: Bedrock model access (Anthropic first-time use)
 
-Bedrock foundation models require a **one-time, per-model opt-in** in the AWS
-console. This cannot be expressed as a CloudFormation resource, so you must do
-it once per account/region before the `bedrock-step` can call Bedrock:
+Bedrock model access is a one-time, account-level enablement, not a
+CloudFormation resource, so you must set it up once before the `bedrock-step`
+can call Bedrock. The old console **Model access** page is no longer the flow
+in commercial regions:
 
-1. Open the **Amazon Bedrock** console in your target region.
-2. Go to **Model access** (left nav).
-3. Request/enable access for the model you intend to invoke. The default is
-   **Anthropic Claude Haiku 5.5** (`anthropic.claude-haiku-5-5`).
-4. Wait until the status shows **Access granted**.
+- In **commercial regions** there is no longer a **Model access** console page
+  to toggle. Access to most foundation models is enabled automatically on the
+  first invocation (an auto-subscription happens in the background). The
+  **Model access** page under Bedrock configurations now applies to **AWS
+  GovCloud (US)** only.
+- **Anthropic** models (the default here) additionally require a **one-time
+  First-Time-Use (FTU) use-case form** per account/organization, submitted
+  BEFORE the first invoke. You can submit it either in the console or via the
+  CLI/SDK:
+  - **Console:** open the **Model catalog**, pick an Anthropic model and open it
+    in the playground, or go to the **Anthropic** providers page, then complete
+    the use-case form. The model may appear greyed out with no visible "accept
+    agreement" control until the FTU form is on file.
+  - **CLI/SDK:** `aws bedrock put-use-case-for-model-access` with the
+    base64-encoded use-case form JSON.
+
+If the console UI is unavailable or the model stays greyed out, the reliable
+end-to-end CLI fallback is:
+
+```bash
+# 1. Get the offer token for the model's agreement.
+aws bedrock list-foundation-model-agreement-offers \
+  --region <your-region> \
+  --model-id anthropic.claude-haiku-5-5 \
+  --offer-type ALL
+
+# 2. Create the agreement using the offerToken from step 1.
+aws bedrock create-foundation-model-agreement \
+  --region <your-region> \
+  --model-id anthropic.claude-haiku-5-5 \
+  --offer-token <token>
+
+# 3. Verify access. Check agreementAvailability.status: AVAILABLE means ready,
+#    PENDING means it is still being set up (give it a few minutes), and
+#    NOT_AVAILABLE means no agreement is on file yet.
+aws bedrock get-foundation-model-availability \
+  --region <your-region> \
+  --model-id anthropic.claude-haiku-5-5
+```
+
+After you submit the agreement it may sit in `PENDING` for a few minutes before
+it becomes `AVAILABLE`; an email is sent when it is ready.
+
+**Permissions for the one-time enablement.** The identity that triggers the
+first subscription needs AWS Marketplace permissions
+(`aws-marketplace:Subscribe`, `aws-marketplace:Unsubscribe`,
+`aws-marketplace:ViewSubscriptions`) plus a valid payment method on the account.
+These are needed ONLY for the one-time enablement, not for ordinary invokes.
+Once the model is enabled for the account, the pipeline's Lambda invokes with
+only `bedrock:InvokeModel`, which the template already grants.
 
 Claude Haiku 5.5 is a cross-region-inference model: calling the bare base id
 `anthropic.claude-haiku-5-5` on the bedrock-runtime `InvokeModel` endpoint fails
@@ -342,7 +389,8 @@ summary and exits non-zero if any check failed. It verifies:
 - 🩹 **SSE-S3 default encryption**, no customer-managed KMS key. →
   *Production:* SSE-KMS with a CMK, key policy, and separate access scopes for
   full vs. redacted vCons.
-- 🩹 **Bedrock model access is a manual console step** done once. →
-  *Production:* provisioned via account setup / landing zone.
+- 🩹 **Bedrock model access is a one-time account-level enablement** (for
+  Anthropic, a first-time-use agreement) done out-of-band, not provisioned by
+  this template. → *Production:* provisioned via account setup / landing zone.
 - 🩹 **Single region, no data-residency controls.** → *Production:* region
   pinning, BAAs, VPC endpoints for the AWS service calls.
