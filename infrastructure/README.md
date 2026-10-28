@@ -147,7 +147,7 @@ path.
 ```
 WaitForRecording   poll S3 (HeadObject) for the recording object
   -> IsRecordingReady (Choice): not ready -> Wait 5s -> WaitForRecording
-LoadSkeleton       load the skeleton vCon for this run
+LoadSkeleton       load the skeleton vCon for this run (pass-through today)
 StartTranscription start the Transcribe Medical BATCH job (async), return job name
   -> WaitForTranscription (Wait 5s)
   -> GetTranscription (poll the job once)
@@ -159,6 +159,12 @@ Analyze            Parallel: Comprehend Medical (meds + conditions) | Bedrock su
 Merge              write analysis[] entries with dialog turn-index provenance
 Done               Succeed
 ```
+
+`LoadSkeleton` is a **pass-through** under the current by-value wiring: the agent
+inlines the skeleton into the `StartExecution` input, so the doc is already on
+the envelope and the step just forwards it. It is kept as a reserved seam for the
+planned **event-driven trigger**, where the pipeline would receive only an object
+key and `LoadSkeleton` would load the skeleton from S3 by key instead.
 
 The clinical **Transcribe Medical** transcript is added to `analysis[]` marked
 `authoritative` and sits **alongside** the live Deepgram transcript already in

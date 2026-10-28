@@ -285,9 +285,17 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
-  # Step 2: load the skeleton vCon from S3 under the run-key prefix. For the
-  # canned/offline path the envelope already carries the doc, so this is a
-  # pass-through that normalizes the envelope for the next state.
+  # Step 2: load the skeleton vCon from S3 under the run-key prefix. In the
+  # current wiring the agent triggers the pipeline with StartExecution carrying
+  # the skeleton inlined by value ({"vcon": <doc>}) and passes NO skeleton_key,
+  # so the envelope already carries the doc and this step is a REDUNDANT
+  # pass-through today -- it just normalizes the envelope for the next state.
+  # It is kept intentionally as a reserved seam for the planned event-driven
+  # trigger (S3 object-created event -> EventBridge -> Step Functions, or
+  # S3 -> Lambda -> StartExecution), where the pipeline would receive only an
+  # object KEY instead of the inlined document and would use the skeleton_key
+  # branch below to read the authoritative skeleton from S3. Do not delete this
+  # as dead code when that trigger is built.
   LoadSkeletonFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -306,6 +314,11 @@ Resources:
           # skeleton to S3 and passes {"vcon": <doc>} into StartExecution, so the
           # doc is present on the envelope; if a `skeleton_key` is supplied we
           # re-read the authoritative copy from S3 instead.
+          #
+          # Two modes: BY-VALUE (current/demo) -- the doc is inlined on the
+          # envelope and no skeleton_key arrives, so this handler just forwards
+          # it. BY-REFERENCE (planned event-driven trigger) -- only a
+          # skeleton_key arrives, so this handler reads the doc from S3 by key.
           #
           # Unwrap convention: one event.get("vcon", event) yields the vCon doc.
           import json
