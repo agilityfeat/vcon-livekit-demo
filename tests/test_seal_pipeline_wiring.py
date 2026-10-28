@@ -273,6 +273,11 @@ def test_seal_redacted_url_set_independent_of_put():
     assert sealed["redacted"]["redacted"]["url"] == (
         "s3://test-bucket/room/sess/ts/vcon-full.jwe"
     )
+    # content_hash is populated on the reference before the PUT try/except too,
+    # so it must survive a failed PUT. Locks in that ordering so a future reorder
+    # that moved hashing into the try block would be caught.
+    content_hash = sealed["redacted"]["redacted"]["content_hash"]
+    assert content_hash and content_hash.startswith("sha512-")
     assert "s3 put_object failed" in (sealed["seal_degraded"] or "")
 
 
