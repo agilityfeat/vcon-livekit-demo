@@ -34,10 +34,12 @@ if _SEAL_PKG not in sys.path:
     sys.path.insert(0, _SEAL_PKG)
 
 from sealing import (  # noqa: E402  (import after importorskip + sys.path shim)
+    CONTENT_HASH_ALG,
     REDACTED_POINTER_TYPE,
     REDACTION_PLACEHOLDER,
     VCON_JWS_CONTENT_TYPE,
     build_redacted_reference,
+    compute_content_hash,
     decrypt_vcon,
     encrypt_vcon,
     generate_demo_keypair,
@@ -253,8 +255,78 @@ def test_build_redacted_reference_optional_url():
         "type": REDACTED_POINTER_TYPE,
         "url": "s3://bucket/full.jws",
     }
-    # url omitted when not supplied.
-    assert "url" not in build_redacted_reference("abc-123")
+    # Bare reference is exactly {uuid, type}: url/content_hash omitted when not
+    # supplied, so existing callers that pass neither are unaffected.
+    assert build_redacted_reference("abc-123") == {
+        "uuid": "abc-123",
+        "type": REDACTED_POINTER_TYPE,
+    }
+
+
+def test_build_redacted_reference_carries_content_hash():
+    ref = build_redacted_reference(
+        "abc-123",
+        url="s3://bucket/full.jwe",
+        content_hash="sha512-deadbeef",
+    )
+    assert ref == {
+        "uuid": "abc-123",
+        "type": REDACTED_POINTER_TYPE,
+        "url": "s3://bucket/full.jwe",
+        "content_hash": "sha512-deadbeef",
+    }
+    # content_hash without url still works and url stays absent.
+    only_hash = build_redacted_reference("abc-123", content_hash="sha512-deadbeef")
+    assert only_hash == {
+        "uuid": "abc-123",
+        "type": REDACTED_POINTER_TYPE,
+        "content_hash": "sha512-deadbeef",
+    }
+    # content_hash omitted when not supplied.
+    assert "content_hash" not in build_redacted_reference("abc-123")
+
+
+# ---------------------------------------------------------------------------
+# content_hash of the externally referenced full copy.
+# ---------------------------------------------------------------------------
+
+
+def test_compute_content_hash_matches_independent_sha512():
+    import base64
+    import hashlib
+
+    data = b"the exact vcon-full.jwe body bytes"
+    expected = (
+        "sha512-"
+        + base64.urlsafe_b64encode(hashlib.sha512(data).digest())
+        .rstrip(b"=")
+        .decode("ascii")
+    )
+    assert compute_content_hash(data) == expected
+    # The algorithm label constant is used verbatim as the prefix.
+    assert compute_content_hash(data).startswith(CONTENT_HASH_ALG + "-")
+    # No base64 '=' padding in the output.
+    assert "=" not in compute_content_hash(data)
+
+
+def test_compute_content_hash_str_and_bytes_identical():
+    text = "sóme ünicode jwe body"
+    assert compute_content_hash(text) == compute_content_hash(text.encode("utf-8"))
+
+
+def test_redact_vcon_copies_url_and_content_hash_onto_pointer():
+    doc = _enriched_vcon()
+    ref = build_redacted_reference(
+        doc["uuid"],
+        url="s3://bucket/room/ts/vcon-full.jwe",
+        content_hash="sha512-abc123",
+    )
+    redacted = redact_vcon(doc, ref)
+    pointer = redacted["redacted"]
+    assert pointer["uuid"] == doc["uuid"]
+    assert pointer["type"] == REDACTED_POINTER_TYPE
+    assert pointer["url"] == "s3://bucket/room/ts/vcon-full.jwe"
+    assert pointer["content_hash"] == "sha512-abc123"
 
 
 def test_redaction_applies_injected_canned_phi_spans():

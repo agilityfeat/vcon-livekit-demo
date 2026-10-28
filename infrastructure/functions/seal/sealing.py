@@ -39,6 +39,8 @@ inline Lambda while this pure core stays offline-testable with canned spans.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import re
@@ -70,6 +72,12 @@ REDACTED_POINTER_TYPE = VCON_JWS_CONTENT_TYPE
 # Stable placeholder substituted for any redacted span. Structure is preserved:
 # fields are never dropped, their sensitive content is blanked to this marker.
 REDACTION_PLACEHOLDER = "[REDACTED]"
+
+# Hash algorithm label for the vCon `content_hash` on an externally referenced
+# file. The draft-ietf-vcon-vcon-container examples (B.5 external recording, B.9
+# redaction) use the `sha512-<base64url>` form, so the algorithm is SHA-512 and
+# the label prefix is "sha512".
+CONTENT_HASH_ALG = "sha512"
 
 # 🩹 Shortcut: naive regex PII patterns (emails, phone numbers, SSN-like digit
 # runs) applied over known dialog/analysis body fields. These are deliberately
@@ -446,10 +454,36 @@ def redact_vcon(
 # ---------------------------------------------------------------------------
 
 
+def compute_content_hash(data: Union[str, bytes]) -> str:
+    """Compute the vCon ``content_hash`` of an externally referenced file.
+
+    This follows the draft-ietf-vcon-vcon-container "Externally Referenced Files"
+    ``content_hash`` format, confirmed from the draft examples (B.5 external
+    recording, B.9 redaction): the literal algorithm label prefix
+    (:data:`CONTENT_HASH_ALG`, ``sha512``) followed by ``-`` and the base64url
+    (RFC 4648 URL-safe alphabet, NO ``=`` padding) encoding of the SHA-512 digest
+    of the EXACT referenced bytes.
+
+    ``data`` is hashed verbatim: ``bytes`` are hashed as-is and a ``str`` is
+    encoded as UTF-8 first, so the exact object body stored at the ``url`` (e.g.
+    the ``vcon-full.jwe`` JWE serialization that is PUT to S3) is what gets
+    hashed. A consumer following the ``redacted`` pointer can re-hash the fetched
+    bytes and compare to detect tampering.
+    """
+    if isinstance(data, str):
+        raw = data.encode("utf-8")
+    else:
+        raw = data
+    digest = hashlib.sha512(raw).digest()
+    encoded = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return "{}-{}".format(CONTENT_HASH_ALG, encoded)
+
+
 def build_redacted_reference(
     full_uuid: str,
     type_: str = REDACTED_POINTER_TYPE,
     url: Optional[str] = None,
+    content_hash: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the vCon ``redacted`` reference pointing back to the full version.
 
@@ -458,11 +492,21 @@ def build_redacted_reference(
     embedded identities), the reference identifies the full version by its
     ``uuid`` plus a content ``type`` (defaulting to the JWS media type, since the
     full version is the signed vCon). An optional ``url`` placeholder locates the
-    stored full copy (e.g. its S3 object) when known.
+    stored full copy (e.g. its S3 object) when known, and an optional
+    ``content_hash`` carries the hash of that referenced full/encrypted copy (see
+    :func:`compute_content_hash`) so a consumer can verify the fetched bytes. Per
+    the spec, for an external reference ``url`` SHOULD be included (unless the
+    target is itself redacted) and ``content_hash`` MUST be included.
+
+    Only ``uuid`` and ``type`` are always present; ``url`` and ``content_hash``
+    are added only when supplied, so a bare ``build_redacted_reference(uuid)``
+    stays exactly ``{'uuid', 'type'}`` and existing callers are unaffected.
 
     Only the redacted copy carries this pointer; the full copy never does.
     """
     reference: Dict[str, Any] = {"uuid": full_uuid, "type": type_}
     if url is not None:
         reference["url"] = url
+    if content_hash is not None:
+        reference["content_hash"] = content_hash
     return reference

@@ -16,9 +16,10 @@ What stays HERE (AWS-only glue that is intentionally NOT in the pure core):
   * the boto3 S3 and Comprehend Medical clients;
   * the fail-open per-field DetectPHI seam fed into ``redact_vcon``;
   * the run-key prefix helper and the three S3 PUTs
-    (vcon-signed.jws / vcon-full.jwe / vcon-redacted.json);
-  * setting the redacted pointer url as soon as the prefix is known (even if the
-    PUTs fail), and the fail-open PUT behavior.
+    (vcon-signed.jws / vcon-full.jwe / vcon-redacted.jws);
+  * populating the redacted pointer (url + content_hash of the full JWE) as soon
+    as the prefix is known, signing the FINAL redacted document over that
+    populated pointer, and the fail-open PUT behavior.
 
 The returned dict shape is identical to the previous inline body:
 ``{vcon, step: 'seal', status: 'ok', redacted, seal_keys, seal_degraded}``.
@@ -31,6 +32,7 @@ import boto3
 
 from sealing import (
     build_redacted_reference,
+    compute_content_hash,
     encrypt_vcon,
     generate_demo_keypair,
     load_jwk_from_env,
@@ -134,21 +136,31 @@ def handler(event, context):
     detect_phi = _make_detect_phi_spans(cm, degraded_spans)
 
     full_uuid = vcon.get("uuid")
-    reference = build_redacted_reference(full_uuid)
-    redacted = redact_vcon(vcon, reference, detect_phi=detect_phi)
-    degraded = degraded_spans[0] if degraded_spans else None
 
     # PUT the three sibling objects next to vcon-skeleton.json under the run-key
     # prefix. The redacted sibling's `redacted` pointer carries the full JWE
-    # object url, set as soon as the prefix is known so a consumer reading
-    # `redacted` sees the url even if a PUT fails.
+    # object url AND content_hash, both populated BEFORE redaction so the
+    # redacted document the redactor signs covers the completed pointer. Per
+    # draft-ietf-vcon-vcon-container 4.1.6 the redactor SHOULD sign the redacted
+    # vCon, and for the external reference the url SHOULD and the content_hash
+    # MUST be included.
     prefix = _prefix_from_recording_key(event.get("recording_key"))
     put_keys = {}
     if bucket and prefix:
         signed_key = "{}/vcon-signed.jws".format(prefix)
         full_key = "{}/vcon-full.jwe".format(prefix)
-        redacted_key = "{}/vcon-redacted.json".format(prefix)
-        redacted["redacted"]["url"] = "s3://{}/{}".format(bucket, full_key)
+        redacted_key = "{}/vcon-redacted.jws".format(prefix)
+        full_url = "s3://{}/{}".format(bucket, full_key)
+        # content_hash is over the EXACT bytes that will be PUT as the full JWE.
+        content_hash = compute_content_hash(full_jwe)
+        reference = build_redacted_reference(
+            full_uuid, url=full_url, content_hash=content_hash
+        )
+        redacted = redact_vcon(vcon, reference, detect_phi=detect_phi)
+        degraded = degraded_spans[0] if degraded_spans else None
+        # Sign the FINAL redacted document, including its now-complete `redacted`
+        # pointer (uuid + type + url + content_hash), with the same demo key.
+        redacted_jws = sign_vcon(redacted, private_key)
         try:
             s3.put_object(
                 Bucket=bucket,
@@ -165,8 +177,8 @@ def handler(event, context):
             s3.put_object(
                 Bucket=bucket,
                 Key=redacted_key,
-                Body=json.dumps(redacted).encode("utf-8"),
-                ContentType="application/json",
+                Body=redacted_jws.encode("utf-8"),
+                ContentType=VCON_JWS_CONTENT_TYPE,
             )
             put_keys = {
                 "signed_key": signed_key,
@@ -179,6 +191,13 @@ def handler(event, context):
             degraded = (degraded + "; " if degraded else "") + (
                 "s3 put_object failed: {}".format(type(exc).__name__)
             )
+    else:
+        # Offline / no-recording path: no run-key prefix means no stored full
+        # copy to reference, so the pointer carries just the uuid (no url /
+        # content_hash) and nothing is signed or PUT (seal_keys stays empty).
+        reference = build_redacted_reference(full_uuid)
+        redacted = redact_vcon(vcon, reference, detect_phi=detect_phi)
+        degraded = degraded_spans[0] if degraded_spans else None
 
     return {
         "vcon": vcon,

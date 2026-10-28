@@ -319,7 +319,7 @@ for a in vcon.get("analysis", []):
     # -----------------------------------------------------------------------
     # SEAL STEP: the terminal Seal state signs (JWS), encrypts (JWE), and
     # redacts the enriched vCon, then PUTs three siblings under the run-key
-    # prefix: vcon-signed.jws / vcon-full.jwe / vcon-redacted.json. Its output
+    # prefix: vcon-signed.jws / vcon-full.jwe / vcon-redacted.jws. Its output
     # is {vcon, step: 'seal', status: 'ok', redacted, seal_keys, seal_degraded}.
     #
     # First assert the Seal state RAN: the terminal output must be step 'seal'
@@ -396,7 +396,7 @@ for name in ("signed_key", "full_key", "redacted_key"):
       # seal_keys empty -> no physical siblings written. Not a failure; record
       # it and note what a real-recording run is needed to confirm.
       pass "Seal wrote no S3 siblings on the canned run (no recording_key -> empty seal_keys, as expected)"
-      echo "NOTE: confirming the physical Seal siblings (vcon-signed.jws / vcon-full.jwe / vcon-redacted.json) requires a run with a REAL recording_key (run the agent against a recording); the canned no-recording input writes none."
+      echo "NOTE: confirming the physical Seal siblings (vcon-signed.jws / vcon-full.jwe / vcon-redacted.jws) requires a run with a REAL recording_key (run the agent against a recording); the canned no-recording input writes none."
     fi
   fi
 fi
