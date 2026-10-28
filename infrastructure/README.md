@@ -377,10 +377,10 @@ summary and exits non-zero if any check failed. It verifies:
 - the S3 bucket has versioning `Enabled`;
 - the S3 default encryption algorithm is `AES256` (SSE-S3);
 - the bucket's public access block has all four flags `true`;
-- the seven pipeline Lambda functions exist (`*-poll-recording-step`,
-  `*-load-skeleton-step`, `*-start-transcription-step`,
+- the eight pipeline Lambda functions exist: the seven inline steps
+  (`*-poll-recording-step`, `*-load-skeleton-step`, `*-start-transcription-step`,
   `*-get-transcription-step`, `*-comprehend-step`, `*-bedrock-step`,
-  `*-merge-step`);
+  `*-merge-step`) plus the packaged `*-seal-step`;
 - the Step Functions state machine status is `ACTIVE`;
 - an **end-to-end execution**: it starts the state machine with the canned
   skeleton vCon input, polls until the execution finishes, asserts the final

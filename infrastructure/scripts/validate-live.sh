@@ -153,9 +153,13 @@ fi
 # Check: the pipeline Lambda functions exist. Names are prefixed with the stack
 # name (default ProjectName), e.g. vcon-livekit-demo-dev-comprehend-step. We
 # list the functions whose names start with the stack name and assert one of
-# each suffix is present. These are the seven real pipeline steps (poll S3 ->
-# load skeleton -> start/get Transcribe Medical -> Comprehend + Bedrock parallel
-# -> merge), so the suffix list matches the states defined in template.yaml.
+# each suffix is present. These are the eight pipeline steps: the seven inline
+# boto3-only steps (poll S3 -> load skeleton -> start/get Transcribe Medical ->
+# Comprehend + Bedrock parallel -> merge) plus the packaged Seal step, so the
+# suffix list matches the states defined in template.yaml. The seal-step is the
+# container-built SAM function this task made deployable, so check it directly:
+# a SealFunction that failed to deploy then produces a crisp FAIL line here
+# instead of only surfacing indirectly through the end-to-end execution.
 # ---------------------------------------------------------------------------
 FUNCTION_NAMES="$(aws lambda list-functions \
   "${REGION_ARG[@]}" \
@@ -169,7 +173,8 @@ for suffix in \
   get-transcription-step \
   comprehend-step \
   bedrock-step \
-  merge-step; do
+  merge-step \
+  seal-step; do
   if echo "${FUNCTION_NAMES}" | tr '\t' '\n' | grep -q -- "-${suffix}$"; then
     pass "Lambda function present: *-${suffix}"
   else
