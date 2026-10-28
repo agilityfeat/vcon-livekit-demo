@@ -40,8 +40,8 @@ AWSTemplateFormatVersion: '2010-09-09'
 
 # AWS SAM transform. The Seal pipeline step is an AWS::Serverless::Function that
 # is container-built (sam build --use-container) so it can ship the third-party
-# jwcrypto dependency and import the real src/vcon_agent/sealing.py core instead
-# of mirroring the crypto by hand. The other seven pipeline steps remain plain
+# jwcrypto dependency and import the packaged functions/seal/sealing.py core
+# instead of mirroring the crypto by hand. The other seven pipeline steps remain plain
 # inline-code AWS::Lambda::Function resources (they import only boto3), which the
 # SAM transform passes through unchanged.
 Transform: AWS::Serverless-2016-10-31
@@ -994,8 +994,8 @@ Resources:
   # functions/seal/ and BuildMethod python3.12, so `sam build --use-container`
   # compiles jwcrypto (+ cryptography) for the Lambda runtime from
   # functions/seal/requirements.txt and ships it in the artifact. The packaged
-  # handler imports the authoritative src/vcon_agent/sealing.py core directly
-  # (vendored into the package by functions/seal/vendor.sh) instead of
+  # handler imports the sealing core packaged alongside it
+  # (functions/seal/sealing.py) directly instead of
   # re-mirroring the crypto by hand. Production would pin the JOSE library and
   # build the artifact in CI/CD.
   SealFunction:

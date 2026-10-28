@@ -11,6 +11,8 @@ explanatory reason rather than failing collection.
 """
 
 import json
+import os
+import sys
 
 import pytest
 
@@ -18,7 +20,20 @@ import pytest
 # installed, instead of failing collection.
 pytest.importorskip("jwcrypto", reason="jwcrypto not installed; crypto tests skipped")
 
-from vcon_agent.sealing import (  # noqa: E402  (import after importorskip)
+# The authoritative sealing core lives in the packaged Seal Lambda under
+# infrastructure/functions/seal/, which is not on the normal import path. Prepend
+# that directory to sys.path so `from sealing import ...` resolves the same file
+# the handler imports at AWS runtime (mirroring tests/test_seal_pipeline_wiring.py).
+_SEAL_PKG = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "infrastructure",
+    "functions",
+    "seal",
+)
+if _SEAL_PKG not in sys.path:
+    sys.path.insert(0, _SEAL_PKG)
+
+from sealing import (  # noqa: E402  (import after importorskip + sys.path shim)
     REDACTED_POINTER_TYPE,
     REDACTION_PLACEHOLDER,
     VCON_JWS_CONTENT_TYPE,

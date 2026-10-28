@@ -372,11 +372,12 @@ inline Lambda body. The live end-to-end check is
 The seal step turns the **enriched** vCon into the signed / sealed record
 and produces a **redacted sibling** linked back to the full version through the
 vCon `redacted` chain. The correctness-critical logic lives in the pure,
-offline-tested core `src/vcon_agent/sealing.py`. Unlike the other pipeline steps
-(which are inline Lambdas that mirror their pure core by hand), the Seal Lambda
-**imports this module directly**: it is a standalone, container-built function
-(packaged with AWS SAM so it can ship the `jwcrypto` dependency) wired after the
-pipeline's merge step.
+offline-tested core `infrastructure/functions/seal/sealing.py`. Unlike the other
+pipeline steps (which are inline Lambdas that mirror their pure core by hand),
+the Seal Lambda **imports the sealing core packaged alongside its handler**: it
+is a standalone, container-built function (packaged with AWS SAM so it can ship
+the `jwcrypto` dependency) wired after the pipeline's merge step. The pytest
+suite imports the same file.
 
 ### What the seal step does
 

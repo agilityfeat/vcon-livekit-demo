@@ -33,7 +33,7 @@ ever sleeps past its timeout.
 |---|---|
 | **S3 bucket** (`AWS::S3::Bucket`) | Recordings from LiveKit Egress + skeleton / enriched / redacted vCon JSON. Versioning on, SSE-S3 default encryption, all public access blocked. |
 | **Inline Lambda functions** (`AWS::Lambda::Function`) | The seven boto3-only pipeline steps invoked by the state machine, inline Python: `poll-recording-step` (poll S3 for the recording), `load-skeleton-step` (load the skeleton vCon), `start-transcription-step` (start the Transcribe Medical batch job), `get-transcription-step` (poll the job once), `comprehend-step` (Comprehend Medical meds + conditions), `bedrock-step` (physician summary), and `merge-step` (merge results into `analysis[]` with turn-index provenance). Each body mirrors the pure, offline-tested logic in `src/vcon_agent/enrichment.py` + `vcon.py` (inline code cannot import the repo package at AWS runtime). These seven import only `boto3`, which the Lambda runtime provides, so they need no build step. |
-| **Packaged Seal Lambda** (`AWS::Serverless::Function`) | The `seal-step`, wired after `merge-step`: it signs the enriched vCon (JWS), encrypts the full copy (JWE), and writes a redacted sibling, persisting the three objects to S3. Unlike the seven inline steps, this one is **not** inlined: it is a container-built SAM function (`CodeUri: functions/seal/`, `Handler: seal_handler.handler`, `Runtime: python3.12`, `Metadata.BuildMethod: python3.12`) that **imports the authoritative `src/vcon_agent/sealing.py`** (vendored into the package) instead of re-mirroring the crypto by hand. It depends on `jwcrypto` -> `cryptography`, which ships compiled native binaries, so it requires `sam build --use-container` (see Deploy below). |
+| **Packaged Seal Lambda** (`AWS::Serverless::Function`) | The `seal-step`, wired after `merge-step`: it signs the enriched vCon (JWS), encrypts the full copy (JWE), and writes a redacted sibling, persisting the three objects to S3. Unlike the seven inline steps, this one is **not** inlined: it is a container-built SAM function (`CodeUri: functions/seal/`, `Handler: seal_handler.handler`, `Runtime: python3.12`, `Metadata.BuildMethod: python3.12`) that **imports the sealing core packaged alongside it (`functions/seal/sealing.py`)** directly instead of re-mirroring the crypto by hand. It depends on `jwcrypto` -> `cryptography`, which ships compiled native binaries, so it requires `sam build --use-container` (see Deploy below). |
 | **Step Functions state machine** (`AWS::StepFunctions::StateMachine`) | The enrichment orchestrator. Polls S3 for the recording, runs Transcribe Medical as an async batch whose completion the state machine awaits, then runs Comprehend Medical and Bedrock as a parallel branch, then merges into `analysis[]`. Invoked by the local app via a deterministic, idempotent `StartExecution`. |
 | **IAM roles** (`AWS::IAM::Role`) | A Step Functions execution role (invokes all seven pipeline Lambdas + writes execution logs) and a Lambda execution role granting access to Transcribe Medical, Comprehend Medical, Bedrock, S3, and CloudWatch Logs. |
 
@@ -195,22 +195,13 @@ sam deploy \
 `global.anthropic.claude-haiku-5-5`); override it to pin a different model or a
 geo profile such as `us.anthropic.claude-haiku-5-5`.
 
-### Sealing-core single source of truth
+### Sealing core
 
-`src/vcon_agent/sealing.py` is the **authoritative** pure crypto/redaction core,
-exercised by the offline pytest suite. The packaged Seal Lambda cannot import the
-repo package at AWS runtime, so a **byte-identical copy** lives at
-`infrastructure/functions/seal/sealing.py`, which `sam build` ships inside the
-function artifact. That copy is **generated**, never hand-edited: regenerate it
-whenever the source changes with
-
-```bash
-bash infrastructure/functions/seal/vendor.sh
-```
-
-A test (`tests/test_seal_pipeline_wiring.py::test_vendored_sealing_matches_source`)
-asserts the vendored copy is byte-identical to the source, so drift is caught if
-the regenerate step is ever forgotten.
+`infrastructure/functions/seal/sealing.py` is the **single authoritative** pure
+crypto/redaction core. It lives inside the packaged Seal Lambda, so `sam build`
+ships it directly in the function artifact. Both the packaged `seal_handler` and
+the offline pytest suite import this same file, so there is no separate source
+copy and no vendoring/regeneration step.
 
 ## Read the Outputs into your local `.env`
 
@@ -473,7 +464,8 @@ for the packaged Seal function, so the offline checks include a SAM-aware lint.
 
 - **Validated offline:** the full pytest suite is green
   (`python3 -m pytest tests/ -q`, which exercises the correctness-critical
-  `src/vcon_agent/{enrichment,vcon,sealing}.py` core and the packaged
+  `src/vcon_agent/{enrichment,vcon}.py` and the packaged
+  `infrastructure/functions/seal/sealing.py` cores and the packaged
   `seal_handler` with fakes); `cfn-lint infrastructure/template.yaml` reports
   **zero errors**; and `sam validate --lint --template infrastructure/template.yaml`
   confirms the SAM template is valid. Each remaining inline Lambda body also
@@ -496,8 +488,8 @@ for the packaged Seal function, so the offline checks include a SAM-aware lint.
   template, restating the pure `enrichment.py` / `vcon.py` logic because inline
   code cannot import the repo package at AWS runtime. The **Seal** step is the
   exception: it is a packaged (container-built) `AWS::Serverless::Function` that
-  imports the authoritative `src/vcon_agent/sealing.py` (vendored into the
-  package), so its crypto is **not** hand-mirrored. It is packaged rather than
+  imports the sealing core packaged alongside its handler
+  (`functions/seal/sealing.py`), so its crypto is **not** hand-mirrored. It is packaged rather than
   inlined because its `jwcrypto` / `cryptography` dependency ships native
   binaries that cannot be inlined and must be compiled for the Lambda runtime
   (hence `sam build --use-container`). → *Production:* CI/CD, versioned artifacts

@@ -7,15 +7,10 @@ step is packaged with AWS SAM (``sam build --use-container``) so it can ship the
 ``jwcrypto`` dependency AND import the authoritative sign/encrypt/redact logic
 directly instead of re-mirroring it.
 
-Single source of truth for the crypto core: ``src/vcon_agent/sealing.py``. A
-byte-identical copy is vendored next to this file as ``sealing.py`` so it is
-present in the build artifact at AWS runtime. Regenerate the vendored copy after
-any change to the source with::
-
-    bash infrastructure/functions/seal/vendor.sh
-
-``tests/test_seal_pipeline_wiring.py`` asserts the vendored copy matches the
-source so drift is caught if that command is forgotten.
+The crypto core lives right here in the package as ``sealing.py``, the single
+authoritative module that both this Lambda and the pytest suite import. It is
+shipped in the SAM build artifact so it is present at AWS runtime; there is no
+separate source copy or vendoring/regeneration step.
 
 What stays HERE (AWS-only glue that is intentionally NOT in the pure core):
   * the boto3 S3 and Comprehend Medical clients;

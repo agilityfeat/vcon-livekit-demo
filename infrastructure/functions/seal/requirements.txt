@@ -1,5 +1,5 @@
 # Runtime dependency for the packaged Seal Lambda. jwcrypto provides the pure
-# Python JWS/JWE/JWK primitives the vendored sealing core uses; it pulls in
+# Python JWS/JWE/JWK primitives the packaged sealing core uses; it pulls in
 # cryptography and typing_extensions transitively. Pinned to the concrete version
 # installed locally and consistent with the jwcrypto>=1.5 main dep in
 # pyproject.toml. `sam build --use-container` compiles cryptography for the
