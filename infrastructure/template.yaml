@@ -66,6 +66,19 @@ Parameters:
       - staging
       - prod
 
+  BedrockModelId:
+    Type: String
+    Default: global.anthropic.claude-haiku-5-5
+    Description: >-
+      Bedrock model (inference profile) id the summary step invokes. Defaults
+      to the global cross-region inference profile for Claude Haiku 5.5. Newer
+      Claude models on Bedrock are cross-region-inference only, so this must be
+      an inference-profile id (base id with a region prefix such as global.,
+      us., eu., au., or jp.), not the bare base id anthropic.claude-haiku-5-5,
+      which returns HTTP 400 on the bedrock-runtime InvokeModel endpoint.
+      Override at deploy time with --parameter-overrides to pin a different
+      model or a geo profile (e.g. us.anthropic.claude-haiku-5-5).
+
 Resources:
 
   # ---------------------------------------------------------------------------
@@ -667,9 +680,16 @@ Resources:
       Timeout: 120
       MemorySize: 128
       Role: !GetAtt LambdaExecutionRole.Arn
+      # BEDROCK_MODEL_ID is an inference-profile id (see the BedrockModelId
+      # parameter). Invoking via an inference profile can require
+      # bedrock:InvokeModel on BOTH the inference-profile ARN and the underlying
+      # foundation-model ARNs across every routed region. The LambdaExecutionRole
+      # bedrock-invoke policy already uses Resource: '*', which covers this, so a
+      # future least-privilege pass must not scope it in a way that breaks
+      # cross-region routing.
       Environment:
         Variables:
-          BEDROCK_MODEL_ID: anthropic.claude-3-haiku-20240307-v1:0
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
       Code:
         ZipFile: |
           # Bedrock: produce a physician-facing summary of the dialog.

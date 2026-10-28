@@ -51,13 +51,23 @@ it once per account/region before the `bedrock-step` can call Bedrock:
 
 1. Open the **Amazon Bedrock** console in your target region.
 2. Go to **Model access** (left nav).
-3. Request/enable access for the model(s) you intend to invoke (for example an
-   Anthropic Claude or Amazon Titan text model).
+3. Request/enable access for the model you intend to invoke. The default is
+   **Anthropic Claude Haiku 5.5** (`anthropic.claude-haiku-5-5`).
 4. Wait until the status shows **Access granted**.
 
-The pipeline still runs end to end without this (the `bedrock-step` falls back to
-an empty summary if the model is unavailable), but a real `bedrock:InvokeModel`
-call only returns a summary once the model is enabled.
+Claude Haiku 5.5 is a cross-region-inference model: calling the bare base id
+`anthropic.claude-haiku-5-5` on the bedrock-runtime `InvokeModel` endpoint fails
+with HTTP 400, so it must be invoked via an **inference-profile id** (the base id
+with a region prefix such as `global.`, `us.`, `eu.`, `au.`, or `jp.`). The
+model id is the `BedrockModelId` CloudFormation parameter, which defaults to the
+global cross-region inference profile `global.anthropic.claude-haiku-5-5`. You
+can override it at deploy time (see the parameter override example below) to pin
+a different model or a geo profile (for example `us.anthropic.claude-haiku-5-5`)
+without editing the template.
+
+The pipeline still runs end to end without model access (the `bedrock-step`
+falls back to an empty summary if the model is unavailable), but a real
+`bedrock:InvokeModel` call only returns a summary once the model is enabled.
 
 **Fail-open with a degraded marker.** Both the `comprehend-step` and the
 `bedrock-step` fail OPEN: if the model call raises (access denied, throttled, or
@@ -86,8 +96,12 @@ aws cloudformation deploy \
   --template-file infrastructure/template.yaml \
   --stack-name vcon-livekit-demo \
   --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides ProjectName=vcon-livekit-demo Environment=dev
+  --parameter-overrides ProjectName=vcon-livekit-demo Environment=dev BedrockModelId=global.anthropic.claude-haiku-5-5
 ```
+
+`BedrockModelId` must be a Bedrock inference-profile id (default
+`global.anthropic.claude-haiku-5-5`); override it to pin a different model or a
+geo profile such as `us.anthropic.claude-haiku-5-5`.
 
 ## Read the Outputs into your local `.env`
 
