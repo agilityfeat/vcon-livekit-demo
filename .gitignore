@@ -3,9 +3,10 @@
 .env.*
 !.env.example
 
-# CloudFormation packaging output
+# CloudFormation / SAM packaging output
 packaged.yaml
 *.packaged.yaml
+.aws-sam/
 
 # Python artifacts
 __pycache__/

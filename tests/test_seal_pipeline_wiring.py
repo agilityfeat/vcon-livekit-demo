@@ -1,4 +1,4 @@
-"""Offline wiring tests for the inline Merge + Seal Lambda bodies.
+"""Offline wiring tests for the inline Merge body + the packaged Seal handler.
 
 The correctness-critical sign/encrypt/redact logic lives in the pure, directly
 unit-tested ``src/vcon_agent/sealing.py``. This module instead guards the
@@ -8,30 +8,34 @@ Seal derives its S3 run-key prefix from ``event["recording_key"]``. A regression
 where an intermediate step drops ``recording_key`` silently disables all three
 S3 PUTs (vcon-signed.jws / vcon-full.jwe / vcon-redacted.json) in a real run.
 
-The inline Lambda handlers only exist as ``Code.ZipFile`` strings in
-``infrastructure/template.yaml`` (they cannot import the repo package at AWS
-runtime), so these tests EXTRACT the inline body and exec it with injected fakes
-for the boto3 clients. Everything stays fully offline and deterministic: no live
-AWS, no network, canned inputs. The tests are guarded with
-``pytest.importorskip`` so they skip cleanly if boto3 / jwcrypto were not
-installed, matching tests/test_sealing.py.
+Merge is still an inline ``Code.ZipFile`` body in
+``infrastructure/template.yaml`` (it imports only boto3 and cannot import the
+repo package at AWS runtime), so the Merge half EXTRACTS the inline body and
+execs it with injected fakes. Seal is no longer inline: it is a packaged
+AWS::Serverless::Function under ``infrastructure/functions/seal/``, so the Seal
+half IMPORTS the packaged ``seal_handler`` by file path and exercises the same
+scenarios with the same injected fakes. The packaged handler creates its boto3
+clients lazily inside ``handler()``, so monkeypatching ``boto3.client`` before
+each call is enough to keep everything offline and deterministic: no live AWS, no
+network, canned inputs. The tests are guarded with ``pytest.importorskip`` so
+they skip cleanly if boto3 / jwcrypto were not installed, matching
+tests/test_sealing.py.
 """
 
+import importlib.util
 import os
 import re
 
 import pytest
 
-pytest.importorskip("boto3", reason="boto3 not installed; inline-body wiring tests skipped")
-pytest.importorskip("jwcrypto", reason="jwcrypto not installed; inline-body wiring tests skipped")
+pytest.importorskip("boto3", reason="boto3 not installed; seal wiring tests skipped")
+pytest.importorskip("jwcrypto", reason="jwcrypto not installed; seal wiring tests skipped")
 
 import boto3  # noqa: E402
 
-_TEMPLATE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "infrastructure",
-    "template.yaml",
-)
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_TEMPLATE = os.path.join(_REPO_ROOT, "infrastructure", "template.yaml")
+_SEAL_PKG = os.path.join(_REPO_ROOT, "infrastructure", "functions", "seal")
 
 
 def _extract_zipfile_body(function_name):
@@ -86,11 +90,11 @@ def _extract_zipfile_body(function_name):
     raise AssertionError("ZipFile body not found for {}".format(function_name))
 
 
-def _load_handler(function_name, client_factory):
+def _load_inline_handler(function_name, client_factory):
     """Exec an extracted inline body with boto3.client monkeypatched.
 
     ``client_factory`` maps a service name to a fake client. Returns the body's
-    ``handler`` callable.
+    ``handler`` callable. Used for the inline Merge body.
     """
     body = _extract_zipfile_body(function_name)
     namespace = {}
@@ -101,6 +105,45 @@ def _load_handler(function_name, client_factory):
     finally:
         boto3.client = original
     return namespace["handler"]
+
+
+def _import_seal_module():
+    """Import the packaged Seal handler module by file path.
+
+    The packaged function lives under ``infrastructure/functions/seal/`` and is
+    not on the normal import path. Its own directory is prepended to sys.path so
+    its ``from sealing import ...`` (the vendored pure core) resolves, matching
+    how `sam build` lays the package out at runtime.
+    """
+    import sys
+
+    if _SEAL_PKG not in sys.path:
+        sys.path.insert(0, _SEAL_PKG)
+    spec = importlib.util.spec_from_file_location(
+        "seal_handler", os.path.join(_SEAL_PKG, "seal_handler.py")
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _packaged_seal_handler(client_factory):
+    """Return a callable that runs the packaged Seal handler with fake clients.
+
+    The packaged handler creates its boto3 clients lazily inside ``handler()``,
+    so ``boto3.client`` is monkeypatched around each invocation.
+    """
+    module = _import_seal_module()
+
+    def _run(event, context):
+        original = boto3.client
+        boto3.client = client_factory
+        try:
+            return module.handler(event, context)
+        finally:
+            boto3.client = original
+
+    return _run
 
 
 class _FakeS3:
@@ -120,7 +163,7 @@ class _FakeCM:
 
 
 def _merge_handler():
-    return _load_handler("MergeFunction", lambda service: None)
+    return _load_inline_handler("MergeFunction", lambda service: None)
 
 
 def _seal_handler(fake_s3, fake_cm):
@@ -135,7 +178,7 @@ def _seal_handler(fake_s3, fake_cm):
     # key is generated in-memory.
     os.environ.pop("VCON_SIGNING_PRIVATE_JWK", None)
     os.environ["BUCKET_NAME"] = "test-bucket"
-    return _load_handler("SealFunction", factory)
+    return _packaged_seal_handler(factory)
 
 
 def _vcon():
@@ -243,3 +286,22 @@ def test_seal_detect_phi_fail_open_per_field():
     assert "detect_phi failed" in (sealed["seal_degraded"] or "")
     # Regex-only redaction still produced the sibling and PUT it.
     assert any(p["Key"].endswith("vcon-redacted.json") for p in fake_s3.puts)
+
+
+def test_vendored_sealing_matches_source():
+    """The vendored seal core must be byte-identical to the authoritative source.
+
+    The packaged Seal Lambda ships a vendored copy of src/vcon_agent/sealing.py
+    (regenerated by infrastructure/functions/seal/vendor.sh) so it can import the
+    real crypto at AWS runtime. This guards against silent drift if the source is
+    changed but the vendored copy is not regenerated."""
+    source = os.path.join(_REPO_ROOT, "src", "vcon_agent", "sealing.py")
+    vendored = os.path.join(_SEAL_PKG, "sealing.py")
+    with open(source, "rb") as fh:
+        source_bytes = fh.read()
+    with open(vendored, "rb") as fh:
+        vendored_bytes = fh.read()
+    assert vendored_bytes == source_bytes, (
+        "Vendored seal core is out of sync with src/vcon_agent/sealing.py; "
+        "regenerate with `bash infrastructure/functions/seal/vendor.sh`"
+    )

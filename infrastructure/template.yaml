@@ -38,6 +38,14 @@ AWSTemplateFormatVersion: '2010-09-09'
 #   * No compute for the agent (no ECS / EC2 / Fargate; the agent runs locally)
 # =============================================================================
 
+# AWS SAM transform. The Seal pipeline step is an AWS::Serverless::Function that
+# is container-built (sam build --use-container) so it can ship the third-party
+# jwcrypto dependency and import the real src/vcon_agent/sealing.py core instead
+# of mirroring the crypto by hand. The other seven pipeline steps remain plain
+# inline-code AWS::Lambda::Function resources (they import only boto3), which the
+# SAM transform passes through unchanged.
+Transform: AWS::Serverless-2016-10-31
+
 Description: >-
   Cloud infrastructure for the vCon + LiveKit demo: an S3 bucket
   (versioning + SSE-S3), a Step Functions state machine orchestrating a real
@@ -972,26 +980,35 @@ Resources:
           Value: !Ref Environment
 
   # Seal step: turn the completed, enriched vCon into the signed/sealed
-  # record and its redacted sibling. Runs AFTER Merge. This inline body MIRRORS
-  # the pure, offline-tested logic in src/vcon_agent/sealing.py (the authoritative
-  # copy) - sign (JWS), encrypt the full signed copy (JWE), and build the redacted
-  # sibling with the vCon `redacted` pointer back to the full version - then PUTs
-  # the signed JWS, the encrypted full JWE, and the redacted sibling JSON to S3
-  # next to vcon-skeleton.json under the run-key prefix.
+  # record and its redacted sibling. Runs AFTER Merge. Sign (JWS), encrypt the
+  # full signed copy (JWE), and build the redacted sibling with the vCon
+  # `redacted` pointer back to the full version, then PUT the signed JWS, the
+  # encrypted full JWE, and the redacted sibling JSON to S3 next to
+  # vcon-skeleton.json under the run-key prefix.
   #
-  # 🩹 Shortcut: inline Code.ZipFile cannot bundle the third-party jwcrypto
-  # dependency (it is NOT in the default AWS Lambda python runtime). The crypto
-  # calls below are mirrored faithfully from sealing.py and import jwcrypto at
-  # module top exactly like the other steps import boto3; a real deploy packages
-  # jwcrypto as a Lambda layer / zip artifact so the import resolves at runtime.
-  # → Production: a packaged build artifact (layer / ECR image) with the JOSE
-  # library pinned, built by CI/CD rather than inline Code.ZipFile.
+  # Unlike the other seven pipeline steps, Seal is NOT an inline Code.ZipFile
+  # body. Inline code cannot bundle the third-party jwcrypto dependency (it is
+  # NOT in the default AWS Lambda python runtime), so the crypto used to be
+  # hand-mirrored from sealing.py inline. The project now packages jwcrypto via a
+  # SAM container build: Seal is an AWS::Serverless::Function with CodeUri
+  # functions/seal/ and BuildMethod python3.12, so `sam build --use-container`
+  # compiles jwcrypto (+ cryptography) for the Lambda runtime from
+  # functions/seal/requirements.txt and ships it in the artifact. The packaged
+  # handler imports the authoritative src/vcon_agent/sealing.py core directly
+  # (vendored into the package by functions/seal/vendor.sh) instead of
+  # re-mirroring the crypto by hand. Production would pin the JOSE library and
+  # build the artifact in CI/CD.
   SealFunction:
-    Type: AWS::Lambda::Function
+    Type: AWS::Serverless::Function
+    Metadata:
+      # Container build so cryptography compiles for Amazon Linux 2023 /
+      # python3.12 / x86_64. Requires Docker: `sam build --use-container`.
+      BuildMethod: python3.12
     Properties:
       FunctionName: !Sub '${ProjectName}-${Environment}-seal-step'
       Runtime: python3.12
-      Handler: index.handler
+      CodeUri: functions/seal/
+      Handler: seal_handler.handler
       Timeout: 120
       MemorySize: 256
       Role: !GetAtt LambdaExecutionRole.Arn
@@ -1005,317 +1022,9 @@ Resources:
           # never ship keys with the app. (Ties to the AWS-plugin
           # long-term-credential caveat - #1719.)
           VCON_SIGNING_PRIVATE_JWK: ''
-      Code:
-        ZipFile: |
-          # Seal the enriched vCon: sign (JWS), encrypt the full signed copy
-          # (JWE), and build the redacted sibling with the vCon `redacted`
-          # pointer, then PUT all three objects to S3 under the run-key prefix.
-          # This MIRRORS src/vcon_agent/sealing.py (the authoritative pure copy);
-          # keep the two in sync by hand.
-          #
-          # 🩹 Shortcut: inline Code.ZipFile cannot bundle the jwcrypto
-          # dependency; a real deploy packages it as a Lambda layer / zip
-          # artifact. jwcrypto is imported at module top like the other steps
-          # import boto3. → Production: packaged build artifact (layer / ECR
-          # image) with the JOSE library pinned.
-          #
-          # Unwrap convention: one event.get("vcon", event) yields the vCon doc.
-          import json
-          import os
-          import re
-
-          import boto3
-          from jwcrypto import jwe, jwk, jws
-          from jwcrypto.common import json_encode
-
-          _S3 = boto3.client("s3")
-          _CM = boto3.client("comprehendmedical")
-
-          # JOSE algs mirrored from sealing.py: PS256 JWS over canonical JSON;
-          # RSA-OAEP-256 + A256GCM JWE.
-          JWS_ALG = "PS256"
-          JWE_ALG = "RSA-OAEP-256"
-          JWE_ENC = "A256GCM"
-          VCON_JWS_CONTENT_TYPE = "application/vcon+jws"
-          REDACTED_POINTER_TYPE = VCON_JWS_CONTENT_TYPE
-          REDACTION_PLACEHOLDER = "[REDACTED]"
-
-          # 🩹 Shortcut: naive regex PII patterns (emails, phone numbers,
-          # SSN-like digit runs) over known dialog/analysis body fields. Coarse
-          # and US-centric. → Production: vetted de-identification against the
-          # full PHI surface, reviewed for the applicable safe-harbor /
-          # expert-determination standard.
-          _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-          _SSN_RE = re.compile(r"\b\d{3}[-\s]\d{2}[-\s]\d{4}\b")
-          _PHONE_RE = re.compile(
-              r"(?<!\w)(?:\+?\d{1,2}[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}(?!\w)"
-          )
-          # Order matters: SSN before phone so a 3-2-4 run is tagged as an SSN.
-          _NAIVE_PII_PATTERNS = (_EMAIL_RE, _SSN_RE, _PHONE_RE)
-
-
-          def _canonical_json(vcon_doc):
-              return json.dumps(vcon_doc, sort_keys=True, separators=(",", ":"))
-
-
-          # 🩹 Shortcut: self-signed demo keypair generated/loaded locally (env
-          # var), not a managed key. → Production: AWS KMS / ACM PCA, key
-          # rotation, HSM-backed signing; never ship keys with the app. (Ties to
-          # the AWS-plugin long-term-credential caveat - #1719.)
-          def _load_or_generate_key():
-              text = os.environ.get("VCON_SIGNING_PRIVATE_JWK", "")
-              if text and text.strip():
-                  stripped = text.strip()
-                  if stripped.startswith("-----BEGIN"):
-                      return jwk.JWK.from_pem(stripped.encode("utf-8"))
-                  return jwk.JWK.from_json(stripped)
-              return jwk.JWK.generate(kty="RSA", size=2048)
-
-
-          def _public_jwk(key):
-              return jwk.JWK.from_json(key.export_public())
-
-
-          def _sign_vcon(vcon_doc, private_key):
-              token = jws.JWS(_canonical_json(vcon_doc).encode("utf-8"))
-              header = {"alg": JWS_ALG, "cty": VCON_JWS_CONTENT_TYPE}
-              kid = private_key.get("kid")
-              if kid:
-                  header["kid"] = kid
-              token.add_signature(
-                  private_key, alg=JWS_ALG, protected=json_encode(header)
-              )
-              return token.serialize()
-
-
-          # 🩹 Shortcut: JWE encryption with a demo key, stored in the same
-          # bucket. → Production: SSE-KMS, separate access scopes for full vs.
-          # redacted, least privilege.
-          def _encrypt_vcon(doc_or_jws, public_key):
-              if isinstance(doc_or_jws, str):
-                  plaintext = doc_or_jws
-              else:
-                  plaintext = _canonical_json(doc_or_jws)
-              token = jwe.JWE(
-                  plaintext.encode("utf-8"),
-                  recipient=public_key,
-                  protected={"alg": JWE_ALG, "enc": JWE_ENC},
-              )
-              return token.serialize(compact=True)
-
-
-          def _spans_from_regex(text):
-              spans = []
-              for pattern in _NAIVE_PII_PATTERNS:
-                  for match in pattern.finditer(text):
-                      spans.append((match.start(), match.end()))
-              return spans
-
-
-          def _apply_spans(text, spans):
-              normalized = []
-              for span in spans:
-                  if span is None or len(span) < 2:
-                      continue
-                  begin, end = int(span[0]), int(span[1])
-                  begin = max(0, min(begin, len(text)))
-                  end = max(0, min(end, len(text)))
-                  if end <= begin:
-                      continue
-                  normalized.append((begin, end))
-              if not normalized:
-                  return text
-              normalized.sort()
-              merged = [list(normalized[0])]
-              for begin, end in normalized[1:]:
-                  if begin <= merged[-1][1]:
-                      merged[-1][1] = max(merged[-1][1], end)
-                  else:
-                      merged.append([begin, end])
-              out = []
-              cursor = 0
-              for begin, end in merged:
-                  out.append(text[cursor:begin])
-                  out.append(REDACTION_PLACEHOLDER)
-                  cursor = end
-              out.append(text[cursor:])
-              return "".join(out)
-
-
-          def _redact_text(text, detect_phi):
-              if not isinstance(text, str) or not text:
-                  return text
-              spans = _spans_from_regex(text)
-              if detect_phi is not None:
-                  spans.extend(detect_phi(text) or [])
-              return _apply_spans(text, spans)
-
-
-          def _redact_entities(entities, detect_phi):
-              redacted = []
-              for ent in entities:
-                  if isinstance(ent, dict):
-                      new_ent = dict(ent)
-                      if isinstance(new_ent.get("text"), str):
-                          new_ent["text"] = _redact_text(new_ent["text"], detect_phi)
-                      redacted.append(new_ent)
-                  else:
-                      redacted.append(ent)
-              return redacted
-
-
-          def _redact_vcon(vcon_doc, full_reference, detect_phi):
-              redacted = json.loads(json.dumps(vcon_doc))
-              for turn in redacted.get("dialog", []):
-                  if isinstance(turn, dict) and isinstance(turn.get("body"), str):
-                      turn["body"] = _redact_text(turn["body"], detect_phi)
-              for entry in redacted.get("analysis", []):
-                  if not isinstance(entry, dict):
-                      continue
-                  body = entry.get("body")
-                  if isinstance(body, str):
-                      entry["body"] = _redact_text(body, detect_phi)
-                  elif isinstance(body, list):
-                      entry["body"] = _redact_entities(body, detect_phi)
-              redacted["redacted"] = dict(full_reference)
-              return redacted
-
-
-          def _build_redacted_reference(full_uuid, url=None):
-              reference = {"uuid": full_uuid, "type": REDACTED_POINTER_TYPE}
-              if url is not None:
-                  reference["url"] = url
-              return reference
-
-
-          def _make_detect_phi_spans(degraded_sink):
-              # Mirror seam for the AWS Comprehend Medical DetectPHI pass: return
-              # (BeginOffset, EndOffset) spans for the text. The pure core in
-              # sealing.py NEVER calls AWS; here the inline Lambda supplies the
-              # real callable while regex spans are ALWAYS applied too.
-              #
-              # 🩹 Fail-open for demo-runnability: the per-field DetectPHI call is
-              # wrapped so a throttle / 5xx / model-access failure on ANY field
-              # degrades to regex-only redaction rather than failing the whole
-              # Seal step, matching how the Comprehend / Bedrock steps wrap their
-              # real call. The first failure is recorded in `degraded_sink` so an
-              # operator can tell regex-only redaction apart from a clean pass.
-              # → Production: a Catch to a visible alarm state, retries with
-              # backoff, and a hard failure path surfaced to operators.
-              def _detect_phi_spans(text):
-                  try:
-                      resp = _CM.detect_phi(Text=text)
-                  except Exception as exc:
-                      if not degraded_sink:
-                          degraded_sink.append(
-                              "comprehend-medical detect_phi failed: {}".format(
-                                  type(exc).__name__
-                              )
-                          )
-                      return []
-                  spans = []
-                  for ent in resp.get("Entities", []) or []:
-                      begin = ent.get("BeginOffset")
-                      end = ent.get("EndOffset")
-                      if begin is not None and end is not None:
-                          spans.append((begin, end))
-                  return spans
-
-              return _detect_phi_spans
-
-
-          def _prefix_from_recording_key(recording_key):
-              # The recording object and vcon-skeleton.json share a run prefix:
-              #   <room>/<session_start>/<timestamp>/<file>
-              # Strip the trailing file name to get the run-key prefix so the
-              # sibling seal objects land next to vcon-skeleton.json.
-              if isinstance(recording_key, str) and "/" in recording_key:
-                  return recording_key.rsplit("/", 1)[0]
-              return None
-
-
-          def handler(event, context):
-              vcon = event.get("vcon", event)
-              bucket = os.environ.get("BUCKET_NAME", "")
-
-              # Sign the enriched vCon (JWS), then encrypt the SIGNED full copy
-              # (JWE). The demo keypair is loaded from the env var or generated.
-              private_key = _load_or_generate_key()
-              public_key = _public_jwk(private_key)
-              signed_jws = _sign_vcon(vcon, private_key)
-              full_jwe = _encrypt_vcon(signed_jws, public_key)
-
-              # Build the redacted sibling. The Comprehend Medical DetectPHI pass
-              # over the known text fields is the detect_phi seam; regex spans are
-              # always applied too. The per-field call is wrapped (fail-open):
-              # the first failure degrades to regex-only and records a marker in
-              # `degraded_spans`, so no single field failure can crash the step.
-              degraded_spans = []
-              detect_phi = _make_detect_phi_spans(degraded_spans)
-
-              full_uuid = vcon.get("uuid")
-              reference = _build_redacted_reference(full_uuid)
-              redacted = _redact_vcon(vcon, reference, detect_phi)
-              degraded = degraded_spans[0] if degraded_spans else None
-
-              # PUT the three sibling objects next to vcon-skeleton.json under the
-              # run-key prefix. The redacted sibling's `redacted` pointer carries
-              # the full JWE object url, set as soon as the prefix is known so a
-              # consumer reading `redacted` sees the url even if a PUT fails.
-              prefix = _prefix_from_recording_key(event.get("recording_key"))
-              put_keys = {}
-              if bucket and prefix:
-                  signed_key = "{}/vcon-signed.jws".format(prefix)
-                  full_key = "{}/vcon-full.jwe".format(prefix)
-                  redacted_key = "{}/vcon-redacted.json".format(prefix)
-                  redacted["redacted"]["url"] = "s3://{}/{}".format(
-                      bucket, full_key
-                  )
-                  try:
-                      _S3.put_object(
-                          Bucket=bucket,
-                          Key=signed_key,
-                          Body=signed_jws.encode("utf-8"),
-                          ContentType=VCON_JWS_CONTENT_TYPE,
-                      )
-                      _S3.put_object(
-                          Bucket=bucket,
-                          Key=full_key,
-                          Body=full_jwe.encode("utf-8"),
-                          ContentType="application/jose",
-                      )
-                      _S3.put_object(
-                          Bucket=bucket,
-                          Key=redacted_key,
-                          Body=json.dumps(redacted).encode("utf-8"),
-                          ContentType="application/json",
-                      )
-                      put_keys = {
-                          "signed_key": signed_key,
-                          "full_key": full_key,
-                          "redacted_key": redacted_key,
-                      }
-                  except Exception as exc:
-                      # 🩹 Fail-open: a PUT failure does not vanish the sealed
-                      # record from the step output. → Production: Catch to an
-                      # alarm + retry.
-                      degraded = (degraded + "; " if degraded else "") + (
-                          "s3 put_object failed: {}".format(type(exc).__name__)
-                      )
-
-              return {
-                  "vcon": vcon,
-                  "step": "seal",
-                  "status": "ok",
-                  "redacted": redacted,
-                  "seal_keys": put_keys,
-                  "seal_degraded": degraded,
-              }
       Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-        - Key: Environment
-          Value: !Ref Environment
+        Project: !Ref ProjectName
+        Environment: !Ref Environment
 
   # ---------------------------------------------------------------------------
   # CloudWatch Logs group for the state machine execution logs.
