@@ -32,7 +32,14 @@
       in
       {
         devShells.default = pkgs.mkShell {
-          buildInputs = [ python ] ++ nativeLibs;
+          # aws-sam-cli provides the `sam` CLI used to build and deploy the
+          # Seal Lambda function (`sam build --use-container` + `sam deploy`).
+          # It is a developer CLI tool rather than a native runtime lib, so it
+          # goes directly in buildInputs (not nativeLibs / LD_LIBRARY_PATH).
+          # Note: `sam build --use-container` also needs Docker, which is
+          # provided by the host/daemon and is intentionally NOT a flake
+          # buildInput.
+          buildInputs = [ python pkgs.aws-sam-cli ] ++ nativeLibs;
 
           shellHook = ''
             # Make the native libraries discoverable so the pip-installed
