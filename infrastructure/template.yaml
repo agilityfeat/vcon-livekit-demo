@@ -359,6 +359,7 @@ Resources:
                   "vcon": vcon,
                   "step": "load-skeleton",
                   "recording_key": event.get("recording_key"),
+                  "recording_ready": event.get("recording_ready"),
               }
       Tags:
         - Key: Project
