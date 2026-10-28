@@ -238,7 +238,7 @@ microsecond-precision UTC instant):
 <room_name>/<session_start_iso>/recording.ogg
 <room_name>/<session_start_iso>/vcon-skeleton.json
 <room_name>/<session_start_iso>/vcon-enriched.json
-<room_name>/<session_start_iso>/vcon-redacted.json
+<room_name>/<session_start_iso>/vcon-redacted.jws
 ```
 
 `session_start_iso` is a microsecond-precision UTC instant captured once per
@@ -385,7 +385,7 @@ summary and exits non-zero if any check failed. It verifies:
   result carries its redacted pointer, then inspects the Seal step's
   `seal_keys`. When `seal_keys` is non-empty (a run with a real `recording_key`,
   see below), it `head-object`s each of the three Seal siblings
-  (`vcon-signed.jws`, `vcon-full.jwe`, `vcon-redacted.json`) and PASS/FAILs per
+  (`vcon-signed.jws`, `vcon-full.jwe`, `vcon-redacted.jws`) and PASS/FAILs per
   object. When `seal_keys` is empty (the expected case for the **canned**
   no-recording run, which derives no run-key prefix and therefore writes no Seal
   siblings), it records that the canned path writes no siblings and notes that
@@ -400,8 +400,15 @@ The Seal step derives the run-key prefix from `event['recording_key']` (via
 ```
 <room_name>/<session_start_iso>/vcon-signed.jws      (application/vcon+jws)
 <room_name>/<session_start_iso>/vcon-full.jwe        (application/jose)
-<room_name>/<session_start_iso>/vcon-redacted.json   (application/json)
+<room_name>/<session_start_iso>/vcon-redacted.jws   (application/vcon+jws)
 ```
+
+The redacted sibling is itself a **signed vCon (JWS)**, and its top-level
+`redacted` pointer carries a `content_hash` of the encrypted full copy
+(`vcon-full.jwe`); see README.md's
+[Redaction scope & limitations](../README.md#redaction-scope--limitations) for
+the sourced detail on what the redaction does and does not strip and the
+conformance behaviors.
 
 Its output dict carries `seal_keys` (`{signed_key, full_key, redacted_key}`)
 when those PUTs happened, and an empty `seal_keys` dict when there was no bucket

@@ -398,12 +398,15 @@ suite imports the same file.
    same party indices. Redacted spans are replaced with a stable `[REDACTED]`
    placeholder rather than dropped, so a consumer can see where redaction
    happened.
-4. **Link via the vCon `redacted` pointer.** The redacted copy carries a
-   top-level `redacted` reference back to the **full signed version**, identified
-   by the full vCon `uuid` plus a content `type` (`application/vcon+jws`),
-   matching the repo's by-`uuid` / by-index convention (never embedded
-   identities). Only the redacted copy carries this pointer; the full copy never
-   does.
+4. **Link via the vCon `redacted` pointer.** The redacted copy is itself a
+   **signed vCon (JWS)**, and it carries a top-level `redacted` reference back to
+   the **full encrypted copy** (`vcon-full.jwe`). The pointer carries the full
+   vCon `uuid`, a content `type` (`application/vcon+jws`), the `url` of the
+   encrypted full copy, and a `content_hash` of that copy, matching the repo's
+   by-`uuid` / by-index convention (never embedded identities). Only the redacted
+   copy carries this pointer; the full copy never does. See
+   [Redaction scope & limitations](#redaction-scope--limitations) for the
+   signed-sibling and `content_hash` conformance detail.
 
 ### Why this runs in the pipeline, not the agent
 
@@ -449,10 +452,63 @@ failing collection) if the JOSE library could not be installed.
   phone numbers, and SSN-like digit runs, plus an optional Comprehend Medical
   `DetectPHI` pass over known fields). → *Production:* vetted de-identification
   against the full PHI surface, reviewed for the applicable safe-harbor /
-  expert-determination standard.
+  expert-determination standard. See
+  [Redaction scope & limitations](#redaction-scope--limitations) below for what
+  is and is not stripped and why.
 - 🩹 **JWE encryption with a demo key, stored in the same bucket** as the rest of
   the vCon artifacts. → *Production:* SSE-KMS, separate access scopes for full
   vs. redacted, least privilege.
+
+### Redaction scope & limitations
+
+The redacted sibling strips **HIPAA identifiers**, not the clinical narrative.
+Two layers do the stripping:
+
+- A **naive local regex** pass over known fields catches emails, SSN-like digit
+  runs, and phone numbers.
+- An optional **AWS Comprehend Medical `DetectPHI`** pass over the same fields
+  detects the nine HIPAA IDENTIFIER entity types it supports: `AGE`, `DATE`,
+  `NAME`, `PHONE_OR_FAX`, `EMAIL`, `ID`, `URL`, `ADDRESS`, and `PROFESSION` (see
+  the [DetectPHI documentation](https://docs.aws.amazon.com/comprehend-medical/latest/dev/textanalysis-phi.html)).
+
+What the redacted copy does **not** strip is the **clinical narrative** itself:
+medical conditions and medications stay in cleartext. That is deliberate. Those
+entities come from a **different** Comprehend Medical API, `DetectEntitiesV2`
+(categories `MEDICAL_CONDITION` and `MEDICATION`; see the
+[DetectEntitiesV2 documentation](https://docs.aws.amazon.com/comprehend-medical/latest/dev/textanalysis-entitiesv2.html)),
+and they are not "PHI" in Comprehend's model. So `DetectPHI` leaving the clinical
+narrative in place is the service **working as designed**, not a defect. The vCon
+container draft also leaves the redaction method out of scope:
+[draft-ietf-vcon-vcon-container](https://datatracker.ietf.org/doc/html/draft-ietf-vcon-vcon-container)
+section 4.1.6 states that "The method of redaction is out of scope of this
+document".
+
+**Production direction.** Vetted de-identification is multi-layered rather than a
+single `DetectPHI` call. The AWS
+[prescriptive guidance for Comprehend Medical](https://docs.aws.amazon.com/prescriptive-guidance/latest/generative-ai-nlp-healthcare/comprehend-medical-rag.html)
+combines Comprehend Medical PHI and entity detection with human review and/or
+LLM guardrails. A production pipeline would add confidence-threshold tuning and
+review against the HIPAA **Safe Harbor** 18-identifier standard or **expert
+determination**. AWS gives its own caveat on the `DetectPHI` page: the detected
+entities "don't map 1:1 to the list specified by the Safe Harbor method", and
+AWS recommends that you "use additional human review or other methods to confirm
+the accuracy of detected PHI". The demo keeps redaction naive on purpose and
+defers the vetted de-identification surface to that production direction.
+
+**vCon conformance of the redacted sibling.** Two behaviors align the redacted
+sibling with the container draft's section 4.1.6:
+
+- The redacted sibling is a **signed vCon (JWS)** rather than bare JSON, signed
+  with the same demo RSA key (`PS256`) used for the full signed copy. This
+  follows the draft's "the redactor SHOULD sign the redacted version of the
+  vCon".
+- The top-level `redacted` pointer carries a **`content_hash`** of the referenced
+  encrypted full copy (`vcon-full.jwe`), alongside its `uuid`, `type`, and `url`.
+  This follows the draft's "url SHOULD be included unless redacted and
+  content_hash MUST be included". The hash format is `sha512-<base64url>`: the
+  literal prefix `sha512-` followed by the unpadded base64url encoding of the
+  SHA-512 digest of the exact stored JWE bytes, matching the draft's Externally
+  Referenced Files examples.
 
 ### Compliance
 
