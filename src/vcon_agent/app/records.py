@@ -56,13 +56,14 @@ if _SEAL_PKG not in sys.path:
 
 import sealing  # noqa: E402  (import after the sys.path shim)
 
-# Environment variable names (mirror persistence.py / agent.py).
-ENV_BUCKET_NAME = "BUCKET_NAME"
-ENV_AWS_REGION = "AWS_REGION"
-ENV_PRIVATE_JWK = "VCON_SIGNING_PRIVATE_JWK"
-ENV_LIVEKIT_URL = "LIVEKIT_URL"
-ENV_LIVEKIT_API_KEY = "LIVEKIT_API_KEY"
-ENV_LIVEKIT_API_SECRET = "LIVEKIT_API_SECRET"
+from ..config import (  # noqa: E402  (import after the sys.path shim)
+    ENV_AWS_REGION,
+    ENV_BUCKET_NAME,
+    ENV_LIVEKIT_API_KEY,
+    ENV_LIVEKIT_API_SECRET,
+    ENV_LIVEKIT_URL,
+    ENV_PRIVATE_JWK,
+)
 
 # The seal step writes three sibling objects under each run-key prefix
 # (<room>/<session_start_iso>/), matching seal_handler.py exactly.

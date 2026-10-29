@@ -39,22 +39,20 @@ from livekit.agents import (
 )
 from livekit.plugins import deepgram, elevenlabs, openai
 
-from .config import load_env
+from .config import (
+    ENV_AWS_ACCESS_KEY_ID,
+    ENV_AWS_REGION,
+    ENV_AWS_SECRET_ACCESS_KEY,
+    ENV_BUCKET_NAME,
+    ENV_LIVEKIT_API_KEY,
+    ENV_LIVEKIT_API_SECRET,
+    ENV_LIVEKIT_URL,
+    load_env,
+)
 from .persistence import persist_vcon
 from .vcon import DEFAULT_CONSENT_SCRIPT, VConBuilder, recording_key, role_to_index
 
 logger = logging.getLogger("vcon_agent.agent")
-
-# Environment variable names for the egress seam (bucket/region mirror
-# persistence.py; the LiveKit creds are the same ones the worker/plugins read).
-ENV_BUCKET_NAME = "BUCKET_NAME"
-ENV_AWS_REGION = "AWS_REGION"
-ENV_AWS_ACCESS_KEY_ID = "AWS_ACCESS_KEY_ID"
-ENV_AWS_SECRET_ACCESS_KEY = "AWS_SECRET_ACCESS_KEY"
-ENV_LIVEKIT_URL = "LIVEKIT_URL"
-ENV_LIVEKIT_API_KEY = "LIVEKIT_API_KEY"
-ENV_LIVEKIT_API_SECRET = "LIVEKIT_API_SECRET"
-
 
 # Load the local .env at import time so credentials are present no matter how the
 # module is reached (``python -m vcon_agent.agent`` or a direct import). This is
