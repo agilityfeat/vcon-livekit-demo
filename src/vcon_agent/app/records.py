@@ -391,6 +391,12 @@ class RecordsStore:
     def full_record(self, run_prefix: str) -> Dict[str, Any]:
         """Return the decoded full doctor-view vCon for ``run_prefix``."""
         if self.is_offline:
+            # 🩹 Shortcut: in offline/fixtures mode there is a SINGLE committed
+            # sample, so ``run_prefix`` is intentionally ignored and that one
+            # pair is returned for any prefix. (In production/S3 mode below,
+            # ``run_prefix`` keys the real artifacts via ``_descriptor_for_prefix``.)
+            # → Production: key fixtures by prefix before adding a second one so
+            # a wrong URL can't silently resolve to the sample.
             doc = self._read_fixture_json(self._FULL_FIXTURE)
             if doc is None:
                 raise FileNotFoundError(
@@ -407,6 +413,8 @@ class RecordsStore:
     def redacted_record(self, run_prefix: str) -> Dict[str, Any]:
         """Return the verified redacted analyst-view vCon for ``run_prefix``."""
         if self.is_offline:
+            # 🩹 Shortcut: single committed sample, so ``run_prefix`` is ignored
+            # offline (see ``full_record`` above); production/S3 keys by prefix.
             doc = self._read_fixture_json(self._REDACTED_FIXTURE)
             if doc is None:
                 raise FileNotFoundError(

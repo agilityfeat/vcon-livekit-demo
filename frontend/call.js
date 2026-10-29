@@ -25,7 +25,7 @@ import {
   createLocalAudioTrack
 } from 'https://cdn.jsdelivr.net/npm/livekit-client/+esm';
 
-'use strict';
+// ES modules are strict by default, so no 'use strict' directive is needed.
 
 function $(id) { return document.getElementById(id); }
 
