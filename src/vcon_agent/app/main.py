@@ -37,7 +37,8 @@ from pydantic import BaseModel
 # Reuse the shared cwd-independent .env loader so the backend reads the SAME
 # local .env (LiveKit creds, BUCKET_NAME, the demo signing key) as the agent,
 # without importing the LiveKit-dependent agent module.
-from ..config import load_env
+from ..config import ENV_LIVEKIT_URL, load_env
+from . import livekit_tokens
 from . import records as records_mod
 
 # src/vcon_agent/app/main.py -> repo root is four parents up.
@@ -90,14 +91,14 @@ def create_app(
         the SAME ``.env`` the agent uses) so the browser client never hardcodes
         the server URL and always targets the same LiveKit server as the agent.
         """
-        token = records_mod.mint_patient_token(
+        token = livekit_tokens.mint_patient_token(
             req.room, req.identity, name=req.name, env=env
         )
         return {
             "token": token,
             "room": req.room,
             "identity": req.identity,
-            "url": env.get(records_mod.ENV_LIVEKIT_URL) or "",
+            "url": env.get(ENV_LIVEKIT_URL) or "",
         }
 
     @app.get("/api/records")

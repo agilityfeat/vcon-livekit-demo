@@ -9,7 +9,6 @@ or a lazy import inside a helper:
 
 * the S3 client is injected (tests pass a fake that returns canned pages);
 * ``boto3`` is imported lazily only inside :func:`make_s3_client`;
-* LiveKit token SIGNING is a seam (default lazily imports ``livekit.api``);
 * the JOSE verify / decrypt reuse the authoritative sealing core in
   ``infrastructure/functions/seal/sealing.py`` (imported via the same
   ``sys.path`` shim used by ``tests/test_sealing.py``) -- NO JOSE is
@@ -33,7 +32,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 # ---------------------------------------------------------------------------
 # Import the authoritative seal core (sign/verify/encrypt/decrypt/...).
@@ -59,9 +58,6 @@ import sealing  # noqa: E402  (import after the sys.path shim)
 from ..config import (  # noqa: E402  (import after the sys.path shim)
     ENV_AWS_REGION,
     ENV_BUCKET_NAME,
-    ENV_LIVEKIT_API_KEY,
-    ENV_LIVEKIT_API_SECRET,
-    ENV_LIVEKIT_URL,
     ENV_PRIVATE_JWK,
 )
 
@@ -79,9 +75,6 @@ REDACTED_OBJECT = "vcon-redacted.jws"
 # src/vcon_agent/app/records.py -> repo root is four parents up.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_FIXTURES_DIR = str(_REPO_ROOT / "frontend" / "fixtures")
-
-# Default access-token lifetime for the patient join grant.
-DEFAULT_TOKEN_TTL_SECONDS = 60 * 60  # one hour
 
 
 # ---------------------------------------------------------------------------
@@ -493,112 +486,3 @@ def _coerce_number(value: Any) -> Any:
         except ValueError:
             return value
     return value
-
-
-# ---------------------------------------------------------------------------
-# LiveKit patient token: pure claim builder + injectable signing seam.
-# ---------------------------------------------------------------------------
-
-
-def build_patient_token_claims(
-    room: str,
-    identity: str,
-    name: Optional[str] = None,
-    ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS,
-) -> Dict[str, Any]:
-    """Build the LiveKit access-token claims for the patient join grant.
-
-    Returns a plain dict describing the grant the patient needs to join the
-    intake room from the browser: a room-join grant scoped to ``room`` plus the
-    ``can_publish`` / ``can_subscribe`` the two-way voice leg requires. This is
-    pure (NO ``livekit`` import) so it is unit-testable offline; the actual
-    token signing happens in the :func:`default_mint_token` seam.
-
-    🩹 Shortcut: the patient identity / room are chosen client-side and the
-    grant is broad (publish + subscribe) with no participant limit or per-user
-    identity binding. → Production: mint tokens server-side for an authenticated
-    patient, bind the identity to a verified record, scope the grant tightly,
-    and keep the TTL short.
-    """
-    return {
-        "identity": identity,
-        "name": name if name is not None else identity,
-        "ttl_seconds": int(ttl_seconds),
-        "grant": {
-            "room_join": True,
-            "room": room,
-            "can_publish": True,
-            "can_subscribe": True,
-            "can_publish_data": True,
-        },
-    }
-
-
-def default_mint_token(
-    claims: Dict[str, Any],
-    env: Optional[Dict[str, str]] = None,
-) -> str:
-    """Sign a LiveKit access token from ``claims`` (the live signing seam).
-
-    Lazily imports ``livekit.api`` (the server token SDK, provided by the
-    ``[app]`` extra's ``livekit-api``) and signs the token with
-    ``LIVEKIT_API_KEY`` / ``LIVEKIT_API_SECRET``. Kept behind this seam -- and
-    reached only from the FastAPI route -- so :func:`build_patient_token_claims`
-    and the tests never require the ``livekit`` package, mirroring agent.py's
-    ``_default_start_egress`` seam.
-
-    This live path (real LiveKit creds, real signing) is NOT part of the
-    automated suite, matching the repo's live-path convention.
-    """
-    if env is None:
-        env = os.environ
-    from livekit import api  # noqa: WPS433 (intentional lazy import)
-
-    grant = claims.get("grant", {})
-    token = (
-        api.AccessToken(
-            env.get(ENV_LIVEKIT_API_KEY),
-            env.get(ENV_LIVEKIT_API_SECRET),
-        )
-        .with_identity(claims["identity"])
-        .with_name(claims.get("name", claims["identity"]))
-        .with_grants(
-            api.VideoGrants(
-                room_join=bool(grant.get("room_join", True)),
-                room=grant.get("room"),
-                can_publish=bool(grant.get("can_publish", True)),
-                can_subscribe=bool(grant.get("can_subscribe", True)),
-                can_publish_data=bool(grant.get("can_publish_data", True)),
-            )
-        )
-    )
-    ttl = claims.get("ttl_seconds")
-    if ttl:
-        from datetime import timedelta
-
-        token = token.with_ttl(timedelta(seconds=int(ttl)))
-    return token.to_jwt()
-
-
-def mint_patient_token(
-    room: str,
-    identity: str,
-    name: Optional[str] = None,
-    ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS,
-    env: Optional[Dict[str, str]] = None,
-    mint_token: Optional[Callable[[Dict[str, Any]], str]] = None,
-) -> str:
-    """Build patient claims and sign them via the injectable ``mint_token`` seam.
-
-    Orchestrates the pure claim builder and the signing seam: builds the claims
-    with :func:`build_patient_token_claims`, then calls ``mint_token`` (defaults
-    to :func:`default_mint_token`) to produce the signed JWT. Tests inject a
-    fake ``mint_token`` and assert it received the expected claims, so no
-    ``livekit`` import is required offline.
-    """
-    claims = build_patient_token_claims(
-        room, identity, name=name, ttl_seconds=ttl_seconds
-    )
-    if mint_token is None:
-        return default_mint_token(claims, env=env)
-    return mint_token(claims)
