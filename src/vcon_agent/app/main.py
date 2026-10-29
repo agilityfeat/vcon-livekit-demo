@@ -34,9 +34,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# Reuse the agent's cwd-independent .env loader so the backend reads the SAME
-# local .env (LiveKit creds, BUCKET_NAME, the demo signing key) as the agent.
-from ..agent import load_env
+# Reuse the shared cwd-independent .env loader so the backend reads the SAME
+# local .env (LiveKit creds, BUCKET_NAME, the demo signing key) as the agent,
+# without importing the LiveKit-dependent agent module.
+from ..config import load_env
 from . import records as records_mod
 
 # src/vcon_agent/app/main.py -> repo root is four parents up.
