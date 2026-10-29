@@ -7,7 +7,11 @@
  *   2. Connect to LIVEKIT_URL with the LiveKit browser client (imported from a
  *      CDN via ESM -- no bundler), enabling the microphone so the human patient
  *      talks to the SAME room the agent worker auto-joins, i.e. the intake bot.
- *   3. Surface connection state + a live mic level so the demo feels real.
+ *   3. Subscribe to and play the bot's REMOTE audio track so the patient
+ *      actually HEARS the intake assistant: each subscribed audio track is
+ *      attached to an <audio> element in a hidden sink (#remote-audio) so it
+ *      routes to the output device, and detached again when it goes away.
+ *   4. Surface connection state + a live mic level so the demo feels real.
  *
  * The backend returns the LiveKit `url` alongside the token (read from the same
  * .env the agent uses), so the browser never hardcodes the server URL.
@@ -22,6 +26,7 @@
 import {
   Room,
   RoomEvent,
+  Track,
   createLocalAudioTrack
 } from 'https://cdn.jsdelivr.net/npm/livekit-client/+esm';
 
@@ -45,8 +50,50 @@ function setConnState(label, kind) {
 var current = {
   room: null,
   micTrack: null,
-  meter: null
+  meter: null,
+  // Media elements created by attaching subscribed remote audio tracks. We
+  // keep references so teardown can detach + remove them (otherwise a second
+  // call would stack stale <audio> elements in the sink).
+  remoteEls: []
 };
+
+/**
+ * Play a subscribed REMOTE audio track by attaching it to an <audio> element
+ * in the hidden #remote-audio sink. attach() returns a media element wired to
+ * the track; appending it to the DOM is what makes it route to the output.
+ */
+function attachRemoteTrack(track) {
+  if (track.kind !== Track.Kind.Audio) return;
+  var sink = $('remote-audio');
+  if (!sink) return;
+  var el = track.attach();
+  current.remoteEls.push(el);
+  sink.appendChild(el);
+}
+
+/** Detach + remove the element(s) created for a track that went away. */
+function detachRemoteTrack(track) {
+  // detach() with no args detaches from all attached elements and returns them.
+  var els = track.detach();
+  if (!Array.isArray(els)) els = els ? [els] : [];
+  for (var i = 0; i < els.length; i++) {
+    var el = els[i];
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+    var idx = current.remoteEls.indexOf(el);
+    if (idx !== -1) current.remoteEls.splice(idx, 1);
+  }
+}
+
+/** Remove any remaining attached remote-audio elements (used on teardown). */
+function clearRemoteAudio() {
+  for (var i = 0; i < current.remoteEls.length; i++) {
+    var el = current.remoteEls[i];
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+  }
+  current.remoteEls = [];
+  var sink = $('remote-audio');
+  if (sink) sink.textContent = '';
+}
 
 /** Ask the backend to mint a patient token for `room`. Returns {token, url}. */
 async function fetchToken(room, name) {
@@ -130,7 +177,23 @@ async function startCall() {
       setStatus('Participant joined: ' + (p.identity || '(unknown)'), 'ok');
     });
 
+    // Play the bot's audio. Registered BEFORE connect() so a track that is
+    // already published when we join is not missed.
+    lkRoom.on(RoomEvent.TrackSubscribed, function (track) {
+      attachRemoteTrack(track);
+    });
+    lkRoom.on(RoomEvent.TrackUnsubscribed, function (track) {
+      detachRemoteTrack(track);
+    });
+
     await lkRoom.connect(creds.url, creds.token);
+
+    // The Start-call flow runs inside the button-click gesture, so autoplay is
+    // already unblocked; startAudio() is belt-and-suspenders to resume playback
+    // on client versions that gate audio behind an explicit user gesture.
+    if (typeof lkRoom.startAudio === 'function') {
+      try { await lkRoom.startAudio(); } catch (e) { /* ignore */ }
+    }
 
     // Publish the microphone so the patient can talk to the bot.
     var micTrack = await createLocalAudioTrack();
@@ -154,6 +217,7 @@ async function startCall() {
 }
 
 async function teardownCall() {
+  clearRemoteAudio();
   if (current.meter) { current.meter(); current.meter = null; }
   if (current.micTrack) {
     try { current.micTrack.stop(); } catch (e) { /* ignore */ }

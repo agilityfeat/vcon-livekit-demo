@@ -77,6 +77,12 @@
       <div class="mic-meter" aria-hidden="true"><span id="mic-level"></span></div>
 
       <p id="status" class="status" role="status" aria-live="polite"></p>
+
+      <!-- Hidden sink for the agent's remote audio. call.js attaches each
+           subscribed audio track to an <audio> element appended here so the
+           patient actually hears the intake assistant; audio plays without
+           being visible. -->
+      <div id="remote-audio" hidden></div>
     </section>
 
     <section class="panel">
