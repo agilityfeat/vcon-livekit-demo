@@ -38,6 +38,14 @@ AWSTemplateFormatVersion: '2010-09-09'
 #   * No compute for the agent (no ECS / EC2 / Fargate; the agent runs locally)
 # =============================================================================
 
+# AWS SAM transform. The Seal pipeline step is an AWS::Serverless::Function that
+# is container-built (sam build --use-container) so it can ship the third-party
+# jwcrypto dependency and import the packaged functions/seal/sealing.py core
+# instead of mirroring the crypto by hand. The other seven pipeline steps remain plain
+# inline-code AWS::Lambda::Function resources (they import only boto3), which the
+# SAM transform passes through unchanged.
+Transform: AWS::Serverless-2016-10-31
+
 Description: >-
   Cloud infrastructure for the vCon + LiveKit demo: an S3 bucket
   (versioning + SSE-S3), a Step Functions state machine orchestrating a real
@@ -87,7 +95,7 @@ Resources:
   # BucketName is derived with !Sub from ProjectName + Environment + AccountId +
   # Region so it is globally unique and does not collide across accounts/regions.
   #
-  # Shortcut (acknowledged): SSE-S3 (AES256) default encryption, not a
+  # Shortcut: SSE-S3 (AES256) default encryption, not a
   # customer-managed KMS key. Production would use SSE-KMS with a CMK, a key
   # policy, and separate access scopes for full vs. redacted vCons.
   #
@@ -119,7 +127,7 @@ Resources:
   # ---------------------------------------------------------------------------
   # Lambda execution role (trusts lambda.amazonaws.com).
   #
-  # Shortcut (acknowledged): BROAD-ISH, SERVICE-LEVEL IAM for demo readability -
+  # Shortcut: BROAD-ISH, SERVICE-LEVEL IAM for demo readability -
   # a single shared role, service-level actions, and a single bucket scope.
   # Production would use least-privilege per action/resource, condition keys, and
   # a separate role per Lambda.
@@ -217,7 +225,7 @@ Resources:
   # input {"vcon": <doc>}; each later step receives the previous step's output
   # envelope {"vcon": <doc>, ...}. One unwrap always yields the vCon document.
   #
-  # Shortcut (acknowledged): inline code via Code.ZipFile instead of versioned
+  # Shortcut: inline code via Code.ZipFile instead of versioned
   # artifacts in S3/ECR built by a CI/CD pipeline.
   # ---------------------------------------------------------------------------
 
@@ -437,6 +445,7 @@ Resources:
                       return {
                           "vcon": vcon,
                           "step": "start-transcription",
+                          "recording_key": key,
                           "job_name": job_name,
                           "canned": False,
                       }
@@ -458,6 +467,7 @@ Resources:
               return {
                   "vcon": vcon,
                   "step": "start-transcription",
+                  "recording_key": key,
                   "job_name": job_name,
                   "canned": True,
                   "canned_transcript": _CANNED_TRANSCRIPT,
@@ -558,6 +568,7 @@ Resources:
                   return {
                       "vcon": vcon,
                       "step": "get-transcription",
+                      "recording_key": event.get("recording_key"),
                       "job_name": event.get("job_name"),
                       "transcription_status": "COMPLETED",
                       "transcript_text": event.get("canned_transcript", ""),
@@ -588,6 +599,7 @@ Resources:
               out = {
                   "vcon": vcon,
                   "step": "get-transcription",
+                  "recording_key": event.get("recording_key"),
                   "job_name": job_name,
                   "transcription_status": status,
               }
@@ -684,6 +696,7 @@ Resources:
               return {
                   "vcon": vcon,
                   "step": "comprehend",
+                  "recording_key": event.get("recording_key"),
                   "entities": entities,
                   "entities_dialog_index": _first_patient_turn_index(vcon),
                   "transcript_text": transcript_text,
@@ -828,6 +841,7 @@ Resources:
               return {
                   "vcon": vcon,
                   "step": "bedrock",
+                  "recording_key": event.get("recording_key"),
                   "summary_text": summary_text,
                   "summary_dialog_indices": _dialog_indices(vcon),
                   "summary_degraded": degraded,
@@ -895,6 +909,16 @@ Resources:
               vcon = base.get("vcon", base)
               vcon.setdefault("analysis", [])
 
+              # Thread the run-key through to the Seal step: Step Functions passes
+              # each task's output verbatim, so the recording_key set by
+              # poll-recording must be re-emitted by every intermediate step. The
+              # Parallel branches each carry it; take it from whichever branch has
+              # it so Seal can locate the run-key S3 prefix.
+              recording_key = (
+                  comprehend.get("recording_key")
+                  or bedrock.get("recording_key")
+              )
+
               transcript_text = comprehend.get("transcript_text", "") or ""
               covered = _text_dialog_indices(vcon)
 
@@ -943,12 +967,64 @@ Resources:
                   summary_entry["degraded"] = summary_degraded
               vcon["analysis"].append(summary_entry)
 
-              return {"vcon": vcon, "step": "merge", "status": "ok"}
+              return {
+                  "vcon": vcon,
+                  "step": "merge",
+                  "status": "ok",
+                  "recording_key": recording_key,
+              }
       Tags:
         - Key: Project
           Value: !Ref ProjectName
         - Key: Environment
           Value: !Ref Environment
+
+  # Seal step: turn the completed, enriched vCon into the signed/sealed
+  # record and its redacted sibling. Runs AFTER Merge. Sign (JWS), encrypt the
+  # full signed copy (JWE), and build the redacted sibling with the vCon
+  # `redacted` pointer back to the full version, then PUT the signed JWS, the
+  # encrypted full JWE, and the redacted sibling JSON to S3 next to
+  # vcon-skeleton.json under the run-key prefix.
+  #
+  # Unlike the other seven pipeline steps, Seal is NOT an inline Code.ZipFile
+  # body. Inline code cannot bundle the third-party jwcrypto dependency (it is
+  # NOT in the default AWS Lambda python runtime), so the crypto used to be
+  # hand-mirrored from sealing.py inline. The project now packages jwcrypto via a
+  # SAM container build: Seal is an AWS::Serverless::Function with CodeUri
+  # functions/seal/ and BuildMethod python3.12, so `sam build --use-container`
+  # compiles jwcrypto (+ cryptography) for the Lambda runtime from
+  # functions/seal/requirements.txt and ships it in the artifact. The packaged
+  # handler imports the sealing core packaged alongside it
+  # (functions/seal/sealing.py) directly instead of
+  # re-mirroring the crypto by hand. Production would pin the JOSE library and
+  # build the artifact in CI/CD.
+  SealFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      # Container build so cryptography compiles for Amazon Linux 2023 /
+      # python3.12 / x86_64. Requires Docker: `sam build --use-container`.
+      BuildMethod: python3.12
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-seal-step'
+      Runtime: python3.12
+      CodeUri: functions/seal/
+      Handler: seal_handler.handler
+      Timeout: 120
+      MemorySize: 256
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref RecordingsBucket
+          # 🩹 Shortcut: self-signed demo keypair carried in a Lambda env var
+          # (env/local), not a managed key. Left EMPTY here so a demo key is
+          # generated at runtime; a demo deploy may set it to a JWK/PEM string.
+          # → Production: AWS KMS / ACM PCA, key rotation, HSM-backed signing;
+          # never ship keys with the app. (Ties to the AWS-plugin
+          # long-term-credential caveat - #1719.)
+          VCON_SIGNING_PRIVATE_JWK: ''
+      Tags:
+        Project: !Ref ProjectName
+        Environment: !Ref Environment
 
   # ---------------------------------------------------------------------------
   # CloudWatch Logs group for the state machine execution logs.
@@ -992,6 +1068,7 @@ Resources:
                   - !GetAtt ComprehendFunction.Arn
                   - !GetAtt BedrockFunction.Arn
                   - !GetAtt MergeFunction.Arn
+                  - !GetAtt SealFunction.Arn
         # CloudWatch Logs for Step Functions logging. These log actions must be
         # granted on "*" per the Step Functions logging requirements.
         - PolicyName: state-machine-logging
@@ -1032,6 +1109,7 @@ Resources:
   #           otherwise -> WaitForTranscription ---------------+
   #     -> Analyze (Parallel: Comprehend | Bedrock)
   #     -> Merge (into analysis[] with turn-index provenance)
+  #     -> Seal (sign JWS, encrypt JWE, redacted sibling + `redacted` pointer)
   #     -> Done (Succeed)
   #
   # The Wait + GetTranscription + Choice loop is how the STATE MACHINE owns the
@@ -1052,7 +1130,7 @@ Resources:
               LogGroupArn: !GetAtt StateMachineLogGroup.Arn
       DefinitionString: !Sub |
         {
-          "Comment": "Real vCon enrichment pipeline: poll S3 -> Transcribe Medical async batch -> Comprehend Medical + Bedrock (parallel) -> merge into analysis[] with turn-index provenance.",
+          "Comment": "Real vCon enrichment pipeline: poll S3 -> Transcribe Medical async batch -> Comprehend Medical + Bedrock (parallel) -> merge into analysis[] with turn-index provenance -> seal (JWS sign, JWE encrypt, redacted sibling with the vCon `redacted` pointer).",
           "StartAt": "WaitForRecording",
           "States": {
             "WaitForRecording": {
@@ -1141,6 +1219,11 @@ Resources:
             "Merge": {
               "Type": "Task",
               "Resource": "${MergeFunction.Arn}",
+              "Next": "Seal"
+            },
+            "Seal": {
+              "Type": "Task",
+              "Resource": "${SealFunction.Arn}",
               "Next": "Done"
             },
             "TranscriptionFailed": {

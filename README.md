@@ -143,7 +143,7 @@ fakes, so the suite runs with **no network and no credentials**:
 python3 -m pytest tests/ -q
 ```
 
-### Acknowledged shortcuts (demo) vs. production
+### Shortcuts (demo) vs. production
 
 - 🩹 **Hardcoded consent script + boolean**, captured up front. → *Production:*
   versioned consent text bound to an authenticated identity, with the
@@ -244,17 +244,18 @@ env-optional behavior of the persistence layer. `AWS_ACCESS_KEY_ID` /
 `AWS_SECRET_ACCESS_KEY` are used for the S3 upload credentials if present and
 otherwise fall back to the instance role.
 
-The **live egress path is not part of automated
+Like the live voice path, the **live egress path is not part of automated
 verification**: it needs real LiveKit and AWS credentials and cannot be
 exercised offline. The egress call sits behind an injectable/mockable seam, so
 the recording-key helper, the recording dialog object, and the egress-request
 builder are all unit-tested offline with fakes (no live LiveKit/AWS).
 
-### Acknowledged shortcuts (demo) vs. production
+### Shortcuts (demo) vs. production
 
 - 🩹 **Plain SSE-S3, no customer-managed KMS key** for the recordings. →
-  *Production:* SSE-KMS with a CMK, bucket policy, and VPC endpoints.
-- 🩹 **Poll-based readiness** (polls S3 at the recording key with a simple
+  *Production:* SSE-KMS with a CMK, bucket policy, and VPC endpoints. (JWE is
+  still demonstrated on the vCon itself.)
+- 🩹 **Poll-based readiness** (the enrichment pipeline polls S3 at the recording key with a simple
   timeout/retry). → *Production:* event-driven readiness with proper dedupe on
   `egressId`, reconciliation for missing events, and handling of early/truncated
   egress.
@@ -331,7 +332,7 @@ and the template is checked with `cfn-lint` plus `python3 -m py_compile` on each
 inline Lambda body. The live end-to-end check is
 `infrastructure/scripts/validate-live.sh` (requires real AWS credentials).
 
-### Acknowledged shortcuts (demo) vs. production
+### Shortcuts (demo) vs. production
 
 - 🩹 **Deterministic idempotency key = `room_name + session start`**, hashed into
   the execution name. → *Production:* a stable server-assigned call/session id
@@ -365,3 +366,149 @@ inline Lambda body. The live end-to-end check is
   runnable while the failure stays visible). → *Production:* a `Catch` to a
   visible alarm state plus retries, so operators are paged rather than reading a
   silently empty result.
+
+## Sign, encrypt & redact
+
+The seal step turns the **enriched** vCon into the signed / sealed record
+and produces a **redacted sibling** linked back to the full version through the
+vCon `redacted` chain. The correctness-critical logic lives in the pure,
+offline-tested core `infrastructure/functions/seal/sealing.py`. Unlike the other
+pipeline steps (which are inline Lambdas that mirror their pure core by hand),
+the Seal Lambda **imports the sealing core packaged alongside its handler**: it
+is a standalone, container-built function (packaged with AWS SAM so it can ship
+the `jwcrypto` dependency) wired after the pipeline's merge step. The pytest
+suite imports the same file.
+
+### What the seal step does
+
+1. **Sign the completed vCon (JWS).** The enriched vCon is serialized to
+   canonical JSON and signed with a demo RSA keypair (`PS256`), producing a JWS.
+   The signed document is the **authoritative, integrity-protected** record;
+   `verify_vcon` recovers the exact payload and fails loudly on a tampered
+   payload or wrong key.
+2. **Encrypt the full copy (JWE).** The full vCon (or its JWS) is encrypted with
+   `RSA-OAEP-256` key wrap + `A256GCM` content encryption, so the complete,
+   un-redacted record is stored **encrypted at rest** and only a holder of the
+   private key can read it.
+3. **Produce the redacted sibling.** A copy of the vCon is created with PII
+   stripped from the `dialog` turn bodies and the `analysis` bodies (free-text
+   transcripts / summaries and the `entities` entity `text`), **keeping the
+   document structure intact** — the same top-level keys, the same
+   `parties` / `dialog` / `analysis` / `attachments` shape and ordering, and the
+   same party indices. Redacted spans are replaced with a stable `[REDACTED]`
+   placeholder rather than dropped, so a consumer can see where redaction
+   happened.
+4. **Link via the vCon `redacted` pointer.** The redacted copy is itself a
+   **signed vCon (JWS)**, and it carries a top-level `redacted` reference back to
+   the **full encrypted copy** (`vcon-full.jwe`). The pointer carries the full
+   vCon `uuid`, a content `type` (`application/vcon+jws`), the `url` of the
+   encrypted full copy, and a `content_hash` of that copy, matching the repo's
+   by-`uuid` / by-index convention (never embedded identities). Only the redacted
+   copy carries this pointer; the full copy never does. See
+   [Redaction scope & limitations](#redaction-scope--limitations) for the
+   signed-sibling and `content_hash` conformance detail.
+
+### Why this runs in the pipeline, not the agent
+
+Signing, encryption, and redaction all happen in the **enrichment pipeline**
+after the merge step, never in the agent process. This keeps the team's "no AWS
+in the agent process" design note intact: the agent's only AWS touchpoint stays
+the single S3 PUT of the skeleton vCon. The redaction step's AWS Comprehend
+Medical `DetectPHI` pass is likewise confined to the packaged Seal Lambda's glue;
+the pure core in `sealing.py` never calls AWS and instead accepts an injected
+`detect_phi`
+callable (or pre-computed `phi_spans`), so it stays fully offline-testable with
+canned spans.
+
+### Library choice: jwcrypto
+
+The seal uses [`jwcrypto`](https://jwcrypto.readthedocs.io/), a pure-Python
+JWS / JWE / JWK library on top of `cryptography`. The vCon spec models a signed
+vCon as a JWS and an encrypted vCon as a JWE over the JSON document, and the vCon
+reference Python library (`python-vcon`) itself uses `jwcrypto` for its
+signing / encryption. Taking `python-vcon` as a direct dependency would pull a
+large, heavier tree that is less reliably installable across
+`requires-python >=3.9`; `jwcrypto` gives the exact JOSE primitives needed to
+implement the vCon JWS / JWE / redacted structure directly while keeping the
+dependency surface small and offline-testable. It is declared as a main
+dependency because the pure core imports it at runtime.
+
+### Offline verification
+
+The seal is verified the same way as the rest of the repo: the sign/verify,
+encrypt/decrypt, and redaction logic are pure functions in `sealing.py`,
+unit-tested in `tests/test_sealing.py` with a demo keypair generated in-memory,
+canned PHI spans, and no live AWS or network. The crypto-dependent tests are
+guarded with `pytest.importorskip('jwcrypto')` so they SKIP cleanly (rather than
+failing collection) if the JOSE library could not be installed.
+
+### Shortcuts (demo) vs. production
+
+- 🩹 **Self-signed demo keypair** generated / loaded locally (env / local), not a
+  managed key. → *Production:* AWS KMS / ACM PCA, key rotation, HSM-backed
+  signing; never ship keys with the app. (Ties to the AWS-plugin
+  long-term-credential caveat — #1719.)
+- 🩹 **Redaction = naive PII removal** (regex over known fields such as emails,
+  phone numbers, and SSN-like digit runs, plus an optional Comprehend Medical
+  `DetectPHI` pass over known fields). → *Production:* vetted de-identification
+  against the full PHI surface, reviewed for the applicable safe-harbor /
+  expert-determination standard. See
+  [Redaction scope & limitations](#redaction-scope--limitations) below for what
+  is and is not stripped and why.
+- 🩹 **JWE encryption with a demo key, stored in the same bucket** as the rest of
+  the vCon artifacts. → *Production:* SSE-KMS, separate access scopes for full
+  vs. redacted, least privilege.
+
+### Redaction scope & limitations
+
+The redacted sibling strips **HIPAA identifiers**, not the clinical narrative.
+Two layers do the stripping:
+
+- A **naive local regex** pass over known fields catches emails, SSN-like digit
+  runs, and phone numbers.
+- An optional **AWS Comprehend Medical `DetectPHI`** pass over the same fields
+  detects the nine HIPAA IDENTIFIER entity types it supports: `AGE`, `DATE`,
+  `NAME`, `PHONE_OR_FAX`, `EMAIL`, `ID`, `URL`, `ADDRESS`, and `PROFESSION` (see
+  the [DetectPHI documentation](https://docs.aws.amazon.com/comprehend-medical/latest/dev/textanalysis-phi.html)).
+
+What the redacted copy does **not** strip is the **clinical narrative** itself:
+medical conditions and medications stay in cleartext. That is deliberate. Those
+entities come from a **different** Comprehend Medical API, `DetectEntitiesV2`
+(categories `MEDICAL_CONDITION` and `MEDICATION`; see the
+[DetectEntitiesV2 documentation](https://docs.aws.amazon.com/comprehend-medical/latest/dev/textanalysis-entitiesv2.html)),
+and they are not "PHI" in Comprehend's model. So `DetectPHI` leaving the clinical
+narrative in place is the service **working as designed**, not a defect. The vCon
+container draft also leaves the redaction method out of scope:
+[draft-ietf-vcon-vcon-container](https://datatracker.ietf.org/doc/html/draft-ietf-vcon-vcon-container)
+section 4.1.6 states that "The method of redaction is out of scope of this
+document".
+
+**Production direction.** Vetted de-identification is multi-layered rather than a
+single `DetectPHI` call. The AWS
+[prescriptive guidance for Comprehend Medical](https://docs.aws.amazon.com/prescriptive-guidance/latest/generative-ai-nlp-healthcare/comprehend-medical-rag.html)
+combines Comprehend Medical PHI and entity detection with human review and/or
+LLM guardrails. A production pipeline would add confidence-threshold tuning and
+review against the HIPAA **Safe Harbor** 18-identifier standard or **expert
+determination**. AWS gives its own caveat on the `DetectPHI` page: the detected
+entities "don't map 1:1 to the list specified by the Safe Harbor method", and
+AWS recommends that you "use additional human review or other methods to confirm
+the accuracy of detected PHI". The demo keeps redaction naive on purpose and
+defers the vetted de-identification surface to that production direction.
+
+**vCon conformance of the redacted sibling.** Two behaviors align the redacted
+sibling with the container draft's section 4.1.6:
+
+- The redacted sibling is a **signed vCon (JWS)**, signed with the same demo RSA
+  key (`PS256`) used for the full signed copy. This follows the draft's "the
+  redactor SHOULD sign the redacted version of the vCon".
+- The top-level `redacted` pointer carries a **`content_hash`** of the referenced
+  encrypted full copy (`vcon-full.jwe`), alongside its `uuid`, `type`, and `url`.
+  This follows the draft's "url SHOULD be included unless redacted and
+  content_hash MUST be included". The hash format is `sha512-<base64url>`: the
+  literal prefix `sha512-` followed by the unpadded base64url encoding of the
+  SHA-512 digest of the exact stored JWE bytes, matching the draft's Externally
+  Referenced Files examples.
+
+### Compliance
+
+this PoC demonstrates the mechanisms vCon provides for consent, integrity, and redaction. It is not a HIPAA-certified deployment and must not be used with real PHI.

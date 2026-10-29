@@ -183,7 +183,7 @@ def build_egress_request(
     recording.ogg) is preferred; the enrichment pipeline keys off recording.ogg
     and can ignore the manifest either way.
 
-    SHORTCUT (acknowledged): audio only (no video) and plain SSE-S3 via the
+    SHORTCUT: audio only (no video) and plain SSE-S3 via the
     S3Upload credentials (no CMK). Production would make audio/video configurable
     per clinical workflow and use SSE-KMS with a customer-managed key.
     """
@@ -351,7 +351,7 @@ async def entrypoint(ctx: JobContext) -> None:
     # Build the unsigned vCon incrementally during the call and record consent
     # BEFORE any dialog turn is appended (the agent speaks the consent script as
     # its first utterance; the boolean attachment is captured up front per the
-    # acknowledged shortcut).
+    # demo shortcut).
     #
     # SHORTCUT: ``granted`` is hardcoded to True and is NOT yet derived from the
     # patient's actual spoken answer. The agent reads the consent script and the
@@ -359,7 +359,7 @@ async def entrypoint(ctx: JobContext) -> None:
     # lands in dialog[]; nothing wires that reply back into this boolean, and
     # there is no consent-denied/abort path. Binding the recorded boolean to the
     # patient's real response (and refusing to proceed on denial) is a Production
-    # concern per the acknowledged consent shortcut.
+    # concern per the consent shortcut.
     builder = VConBuilder()
     builder.add_consent(granted=True, script=DEFAULT_CONSENT_SCRIPT)
 
@@ -381,8 +381,8 @@ async def entrypoint(ctx: JobContext) -> None:
         except Exception:  # pragma: no cover - defensive; never break the call
             logger.exception("failed to record dialog turn (role=%r)", role)
 
-    # Persist ONCE on session end: the single flush-to-S3 PUT (acknowledged
-    # shortcut), with the local-file fallback when the AWS backend env is absent and a
+    # Persist ONCE on session end: the single flush-to-S3 PUT (demo shortcut),
+    # with the local-file fallback when the AWS backend env is absent and a
     # guarded StartExecution when STATE_MACHINE_ARN is set.
     async def _flush_vcon() -> None:
         try:
