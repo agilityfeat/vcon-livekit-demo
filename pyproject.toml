@@ -17,8 +17,8 @@ dependencies = [
     "python-dotenv>=1.0",
     # JWS/JWE/JWK primitives for signing, encrypting, and the redacted
     # vCon. jwcrypto is a pure-Python JOSE library on top of `cryptography`; the
-    # pure sealing core (src/vcon_agent/sealing.py) imports it at runtime, so it
-    # is a main dependency. Installable on requires-python >=3.9.
+    # pure sealing core (infrastructure/functions/seal/sealing.py) imports it at
+    # runtime, so it is a main dependency. Installable on requires-python >=3.9.
     "jwcrypto>=1.5",
 ]
 
