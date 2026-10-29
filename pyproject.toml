@@ -26,6 +26,17 @@ dependencies = [
 dev = [
     "pytest>=7.0",
 ]
+# Runtime deps for the local end-to-end demo backend: a FastAPI app served by
+# uvicorn that mints LiveKit patient access tokens and reads/verifies/decrypts
+# the vCon artifacts for the doctor/analyst viewers. livekit-api is the server
+# token/REST SDK (provides livekit.api.AccessToken) and is distinct from the
+# livekit-agents worker SDK in the main deps. python-dotenv is already a main
+# dependency, so it is not repeated here.
+app = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "livekit-api>=0.6",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
