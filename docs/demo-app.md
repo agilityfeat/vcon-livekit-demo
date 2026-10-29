@@ -57,12 +57,50 @@ python -m vcon_agent.agent dev
 Then open the app, click **Start call**, and talk to the bot. Once the pipeline
 finishes, the record shows up on the **Records** page.
 
+### Signing key must match (live mode)
+
+> **Note:** In live mode the backend decrypts `vcon-full.jwe` and verifies the
+> JWS using `VCON_SIGNING_PRIVATE_JWK` from `.env`, while the deployed Seal
+> Lambda seals those S3 artifacts using ITS own `VCON_SIGNING_PRIVATE_JWK` (or,
+> if that variable is unset in the Lambda, an **ephemeral in-memory keypair**
+> generated per invocation). The two must be the **same key**, or the doctor /
+> full view fails to decrypt with
+> `jwcrypto.common.InvalidJWEData: No recipient matched the provided key`
+> (surfaced as an HTTP 500). Records sealed by an ephemeral (or otherwise
+> mismatched) key can never be decrypted later.
+>
+> Fix: set the **same** `VCON_SIGNING_PRIVATE_JWK` in BOTH the Seal Lambda
+> environment and the local `.env`, then place a NEW call (previously sealed
+> records keep their old key and stay undecryptable). Generate a keypair with:
+>
+> ```bash
+> python -c "from jwcrypto import jwk; print(jwk.JWK.generate(kty='RSA', size=2048).export(private_key=True))"
+> ```
+
 ### Offline mode (viewer side, no call, no AWS)
 
-Leave `BUCKET_NAME` unset. The backend serves one synthetic record from the
-committed sample fixture pair under `frontend/fixtures/`, so the records list and the
-doctor / analyst views are fully demoable with no live call and no AWS. (The
-patient Start-call page still needs real LiveKit creds to actually connect.)
+The backend loads the repo-root `.env` into the environment at startup, so the
+offline switch is driven by whether `BUCKET_NAME` is **present in the loaded
+environment**: set → read real records from S3; absent → serve the committed
+offline fixture pair.
+
+To force offline mode when you have a populated `.env` (the one you filled in
+for the live demo), **comment out the `BUCKET_NAME` line in `.env`** (prefix it
+with `#`) and restart the server. An empty or absent `.env` also runs offline.
+
+> **Why not `env -u`?** Prefixing the launch with
+> `env -u BUCKET_NAME ... uvicorn ...` does **not** force offline mode: the app
+> re-reads `.env` at startup and re-sets `BUCKET_NAME` after the process has
+> started, so the unset is undone. Commenting the line out in `.env` is the only
+> reliable switch.
+
+In offline mode the backend serves one synthetic record from the committed
+sample fixture pair under `frontend/fixtures/`, so the records list and the
+doctor / analyst views are fully demoable with no live call and no AWS. That
+record has the run prefix `fixtures/sample-call`; open **that** record from the
+Records list (not a stale `console-...` URL left over from a live session, which
+would still hit the S3 lookup). (The patient Start-call page still needs real
+LiveKit creds to actually connect.)
 
 ## Offline fixtures
 
