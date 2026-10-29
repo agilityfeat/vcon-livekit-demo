@@ -217,11 +217,7 @@ function renderAudio(doc) {
     // turn's numeric start so the provenance behavior is demonstrable.
     // → Production: the viewer streams the recording from a signed URL.
     audioEl.removeAttribute('src');
-    note.textContent =
-      '🩹 Recording url is an s3:// reference (' + rec.url + '), not playable ' +
-      'in a browser, and no audio is bundled. Medication clicks still seek to ' +
-      'the mapped dialog turn start (watch the audio position). → Production: ' +
-      'stream from a signed URL.';
+    note.textContent = 'Audio is not available for this record.';
   } else {
     audioEl.src = src;
     note.textContent = 'Audio source: ' + rec.url;

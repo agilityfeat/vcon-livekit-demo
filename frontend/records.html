@@ -14,7 +14,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Records &middot; vCon Care Demo</title>
+  <title>Records &middot; vCon Care</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -29,12 +29,6 @@
       <a href="records.html" data-page="records">Records</a>
     </nav>
   </header>
-
-  <div class="demo-banner">
-    <strong>Demo build.</strong> The doctor and analyst are
-    <strong>asynchronous viewers</strong> here &mdash; they open a produced
-    record; they do not join the live call.
-  </div>
 
   <main>
     <section class="hero">
@@ -52,10 +46,8 @@
       <div id="empty-state" class="empty-state" hidden>
         <p><strong>No records yet.</strong></p>
         <p>
-          Either <a href="index.html">place an intake call</a> (the record
-          appears once the enrichment pipeline finishes), or run the backend in
-          offline mode (leave <code>BUCKET_NAME</code> unset) to serve the
-          committed sample fixture.
+          <a href="index.html">Place an intake call</a> to create a record. It
+          appears here once the conversation has been processed.
         </p>
       </div>
     </section>

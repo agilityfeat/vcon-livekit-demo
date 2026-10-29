@@ -101,8 +101,8 @@ function startMicMeter(mediaStreamTrack) {
 }
 
 async function startCall() {
-  var room = $('room-input').value.trim() || 'intake-demo';
-  var name = $('name-input').value.trim() || 'Demo Patient';
+  var room = $('room-input').value.trim() || 'intake';
+  var name = $('name-input').value.trim() || 'Patient';
 
   $('start-call-btn').disabled = true;
   setConnState('Requesting access…', 'connecting');
