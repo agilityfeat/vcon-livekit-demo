@@ -12,6 +12,11 @@ documents.
 - **AWS enrichment backend** — an S3 bucket, a Step Functions state machine, the
   pipeline Lambda functions, and the IAM roles that tie them together, all
   provisioned by a single CloudFormation template.
+- **Demo application** — a single, locally-runnable app (FastAPI backend +
+  vanilla multi-page frontend) where a human patient places a real intake call
+  to the bot from the browser, and doctor / analyst roles review the produced
+  vCon records. See **[frontend/README.md](frontend/README.md)** for the
+  end-to-end run story and the demo shortcuts.
 
 ## Infrastructure
 

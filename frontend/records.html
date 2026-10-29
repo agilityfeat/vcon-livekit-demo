@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<!--
+  Records list page: fetch GET /api/records and list the available call
+  records, each linking to the detail page. When BUCKET_NAME is set the backend
+  scans S3; otherwise it serves one synthetic record from the committed offline
+  fixture pair so the viewer side is demoable with no live call.
+
+  🩹 Demo shortcut: records are discovered by scanning the bucket's run-key
+  prefixes (or the single offline fixture), with no pagination. → Production: a
+  queryable records index (e.g. DynamoDB) with pagination, filtering, and
+  per-role access scoping.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Records &middot; vCon Care Demo</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="app-brand">
+      <span class="logo">🩺</span>
+      <h1>vCon Care</h1>
+      <span class="product-tag">intake &middot; records &middot; review</span>
+    </div>
+    <nav class="app-nav" aria-label="Primary">
+      <a href="index.html" data-page="index">Start call</a>
+      <a href="records.html" data-page="records">Records</a>
+    </nav>
+  </header>
+
+  <div class="demo-banner">
+    <strong>Demo build.</strong> The doctor and analyst are
+    <strong>asynchronous viewers</strong> here &mdash; they open a produced
+    record; they do not join the live call.
+  </div>
+
+  <main>
+    <section class="hero">
+      <h2>Call records</h2>
+      <p>
+        Each completed intake call produces a signed + encrypted vCon record.
+        Open one to review it as a <strong>doctor</strong> (full) or an
+        <strong>analyst</strong> (redacted).
+      </p>
+    </section>
+
+    <section class="panel">
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+      <ul id="record-list" class="record-list"></ul>
+      <div id="empty-state" class="empty-state" hidden>
+        <p><strong>No records yet.</strong></p>
+        <p>
+          Either <a href="index.html">place an intake call</a> (the record
+          appears once the enrichment pipeline finishes), or run the backend in
+          offline mode (leave <code>BUCKET_NAME</code> unset) to serve the
+          committed sample fixture.
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+  <script src="records.js"></script>
+</body>
+</html>

@@ -1,0 +1,128 @@
+{
+  "analysis": [
+    {
+      "authoritative": true,
+      "body": "Agent: What brings you in today? Patient: I've had a bad headache since yesterday. Agent: Have you taken anything for it? Patient: I took some ibuprofen this morning but it didn't help much.",
+      "dialog": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "mimetype": "text/plain",
+      "type": "transcript",
+      "vendor": "aws-transcribe-medical"
+    },
+    {
+      "body": [
+        {
+          "category": "MEDICATION",
+          "score": 0.99,
+          "text": "ibuprofen"
+        },
+        {
+          "category": "MEDICAL_CONDITION",
+          "score": 0.98,
+          "text": "headache"
+        }
+      ],
+      "dialog": [
+        3
+      ],
+      "type": "entities",
+      "vendor": "aws-comprehend-medical"
+    },
+    {
+      "body": "Patient reports a headache since yesterday, self-treated with ibuprofen with little relief.",
+      "dialog": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "mimetype": "text/plain",
+      "type": "summary",
+      "vendor": "aws-bedrock"
+    }
+  ],
+  "attachments": [
+    {
+      "granted": true,
+      "party": 0,
+      "script": "This call will be recorded and transcribed to assist with your intake. Do you consent to recording and processing of this conversation?",
+      "timestamp": "2026-10-29T18:43:51.721373+00:00",
+      "type": "consent"
+    }
+  ],
+  "created_at": "2026-10-29T18:43:51.721341+00:00",
+  "dialog": [
+    {
+      "body": "Hi, thanks for calling. What brings you in today?",
+      "duration": 4.0,
+      "mimetype": "text/plain",
+      "party": 1,
+      "start": 0.0,
+      "type": "text"
+    },
+    {
+      "body": "I've had a bad headache since yesterday.",
+      "duration": 3.5,
+      "mimetype": "text/plain",
+      "party": 0,
+      "start": 4.0,
+      "type": "text"
+    },
+    {
+      "body": "I'm sorry to hear that. Have you taken anything for it?",
+      "duration": 4.0,
+      "mimetype": "text/plain",
+      "party": 1,
+      "start": 7.5,
+      "type": "text"
+    },
+    {
+      "body": "I took some ibuprofen this morning but it didn't help much.",
+      "duration": 4.5,
+      "mimetype": "text/plain",
+      "party": 0,
+      "start": 11.5,
+      "type": "text"
+    },
+    {
+      "body": "Understood. What is the best callback number for you?",
+      "duration": 3.5,
+      "mimetype": "text/plain",
+      "party": 1,
+      "start": 16.0,
+      "type": "text"
+    },
+    {
+      "body": "You can reach me at 415-555-0137.",
+      "duration": 3.0,
+      "mimetype": "text/plain",
+      "party": 0,
+      "start": 19.5,
+      "type": "text"
+    },
+    {
+      "duration": 23.0,
+      "mimetype": "audio/ogg",
+      "start": 0.0,
+      "type": "recording",
+      "url": "s3://demo-bucket/fixtures/sample-call/recording.ogg"
+    }
+  ],
+  "parties": [
+    {
+      "name": "Patient",
+      "role": "patient"
+    },
+    {
+      "name": "Intake Agent",
+      "role": "agent"
+    }
+  ],
+  "subject": "Patient intake call (demo fixture)",
+  "uuid": "4aad0b23-3ec3-4cdb-a85e-9ff431269360",
+  "vcon": "0.0.1"
+}

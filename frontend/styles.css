@@ -1,0 +1,279 @@
+/*
+ * Shared styling for the vCon + LiveKit demo app -- plain CSS, no external
+ * fonts or CDNs, so every page runs with only what the FastAPI backend serves.
+ * Adapted from the standalone viewer stylesheet and extended with an app-shell
+ * nav header so the multi-page demo LOOKS like a real product.
+ */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  color: #1a1f2b;
+  background: #f4f6fa;
+  line-height: 1.5;
+}
+
+/* ---------------- App shell / nav header ---------------- */
+
+.app-header {
+  background: #1f2a44;
+  color: #fff;
+  padding: 0.85rem 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+.app-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+.app-brand .logo { font-size: 1.3rem; }
+.app-brand h1 { margin: 0; font-size: 1.2rem; }
+.app-brand .product-tag {
+  color: #b9c2d8;
+  font-size: 0.8rem;
+}
+.app-nav {
+  display: flex;
+  gap: 1rem;
+  margin-left: auto;
+}
+.app-nav a {
+  color: #cdd6ea;
+  text-decoration: none;
+  font-size: 0.95rem;
+  padding: 0.2rem 0;
+  border-bottom: 2px solid transparent;
+}
+.app-nav a:hover { color: #fff; }
+.app-nav a.active { color: #fff; border-bottom-color: #1f6feb; }
+
+/* ---------------- Demo-shortcut banner ---------------- */
+
+.demo-banner {
+  background: #fff8e6;
+  border-bottom: 1px solid #e8d48a;
+  color: #6a5a1e;
+  padding: 0.6rem 1.5rem;
+  font-size: 0.85rem;
+}
+.demo-banner strong { color: #7a4a00; }
+
+/* ---------------- Layout ---------------- */
+
+main { padding: 1.25rem 1.5rem; max-width: 62rem; margin: 0 auto; }
+
+.hero { padding: 1.5rem 0 0.5rem; }
+.hero h2 { margin: 0 0 0.4rem; font-size: 1.6rem; }
+.hero p { margin: 0 0 0.75rem; color: #3a4252; max-width: 44rem; }
+
+.panel {
+  background: #fff;
+  border: 1px solid #dfe3ec;
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+.panel h2 { margin-top: 0; font-size: 1.1rem; }
+.panel h3 { margin: 0 0 0.4rem; font-size: 1rem; }
+
+.note { color: #5a6479; font-size: 0.85rem; }
+.shortcut {
+  background: #f6f8fc;
+  border-left: 3px solid #e8b94a;
+  padding: 0.5rem 0.75rem;
+  margin: 0.6rem 0;
+  font-size: 0.85rem;
+  color: #4a5262;
+}
+.shortcut .prod { color: #2b6a3a; font-weight: 600; }
+
+/* ---------------- Buttons / inputs ---------------- */
+
+button {
+  font: inherit;
+  padding: 0.5rem 1rem;
+  border: 1px solid #b7c0d4;
+  border-radius: 6px;
+  background: #eef1f7;
+  cursor: pointer;
+}
+button:hover { background: #e2e7f1; }
+button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.btn-primary {
+  background: #1f6feb;
+  border-color: #1f6feb;
+  color: #fff;
+  font-size: 1.05rem;
+  padding: 0.65rem 1.4rem;
+}
+.btn-primary:hover { background: #1a5fd0; }
+.btn-danger { background: #b42318; border-color: #b42318; color: #fff; }
+.btn-danger:hover { background: #99200f; }
+
+input[type="text"] {
+  font: inherit;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid #b7c0d4;
+  border-radius: 6px;
+  min-width: 14rem;
+}
+.field-row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-bottom: 0.75rem; }
+.field-row label { font-size: 0.9rem; font-weight: 600; display: flex; flex-direction: column; gap: 0.2rem; }
+
+/* ---------------- Call page status ---------------- */
+
+.call-controls { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+
+.status-line { display: flex; align-items: center; gap: 0.5rem; margin: 0.9rem 0 0; font-size: 0.95rem; }
+.dot {
+  width: 0.7rem; height: 0.7rem; border-radius: 50%;
+  background: #b7c0d4; display: inline-block;
+}
+.dot.connecting { background: #e8b94a; }
+.dot.connected { background: #157347; }
+.dot.error { background: #b42318; }
+
+.status { margin: 0.75rem 0 0; min-height: 1.2em; font-size: 0.9rem; }
+.status.error { color: #b42318; }
+.status.ok { color: #157347; }
+
+.mic-meter {
+  height: 0.5rem;
+  background: #e5e9f2;
+  border-radius: 999px;
+  overflow: hidden;
+  margin-top: 0.4rem;
+}
+.mic-meter > span {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: #1f6feb;
+  transition: width 0.08s linear;
+}
+
+/* ---------------- Records list ---------------- */
+
+.record-list { list-style: none; margin: 0; padding: 0; }
+.record-list li {
+  border: 1px solid #dfe3ec;
+  border-radius: 8px;
+  background: #fff;
+  padding: 0.85rem 1rem;
+  margin-bottom: 0.6rem;
+}
+.record-list a { color: #1f6feb; text-decoration: none; font-weight: 600; }
+.record-list a:hover { text-decoration: underline; }
+.record-meta { color: #5a6479; font-size: 0.82rem; margin-top: 0.2rem; font-family: ui-monospace, Menlo, Consolas, monospace; }
+
+.empty-state {
+  border: 1px dashed #c3ccdd;
+  border-radius: 8px;
+  padding: 1.25rem;
+  background: #fbfcfe;
+  color: #4a5262;
+}
+
+/* ---------------- Record detail (salvaged viewer styles) ---------------- */
+
+.view-toggle { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem; }
+.toggle-label { font-weight: 600; font-size: 0.9rem; }
+.view-toggle button.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+
+.link-banner {
+  background: #fff8e6;
+  border: 1px solid #e8d48a;
+  border-radius: 8px;
+  padding: 0.85rem 1.1rem;
+  margin-bottom: 1rem;
+}
+.link-banner h2 { margin: 0 0 0.4rem; font-size: 1rem; }
+.link-banner .uuid-pair {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+}
+.link-banner .uuid-pair div span { color: #5a6479; display: block; font-family: inherit; }
+.link-banner .pointer-detail { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.78rem; color: #5a6479; margin: 0.5rem 0 0; word-break: break-all; }
+.same-vcon {
+  display: inline-block;
+  margin-top: 0.5rem;
+  padding: 0.15rem 0.5rem;
+  background: #157347;
+  color: #fff;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.same-vcon.mismatch { background: #b42318; }
+
+.meta-grid { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; margin: 0; }
+.meta-grid dt { font-weight: 600; color: #3a4252; }
+.meta-grid dd { margin: 0; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.85rem; word-break: break-all; }
+
+audio { width: 100%; }
+
+.parties { margin: 0; padding-left: 1.25rem; }
+.parties li { margin-bottom: 0.25rem; }
+.party-role { color: #5a6479; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.chip {
+  font: inherit;
+  padding: 0.35rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid #b7c0d4;
+  background: #eef1f7;
+}
+.chip.medication { background: #e6f0ff; border-color: #9cc0ff; cursor: pointer; }
+.chip.medication:hover { background: #d2e3ff; }
+.chip.condition { background: #fdebe8; border-color: #f0b6ac; cursor: default; }
+.chip .cat { font-size: 0.7rem; color: #5a6479; margin-left: 0.3rem; }
+
+.dialog { list-style: none; margin: 0; padding: 0; }
+.dialog li {
+  padding: 0.5rem 0.7rem;
+  border-radius: 6px;
+  margin-bottom: 0.35rem;
+  background: #f7f9fc;
+  border: 1px solid transparent;
+}
+.dialog li.patient { background: #f3f8f3; }
+.dialog li.agent { background: #f4f6fb; }
+.dialog li.highlight {
+  border-color: #1f6feb;
+  background: #e6f0ff;
+  box-shadow: 0 0 0 2px rgba(31, 111, 235, 0.25);
+}
+.speaker { font-weight: 600; margin-right: 0.4rem; }
+.turn-time { color: #5a6479; font-size: 0.78rem; margin-left: 0.4rem; }
+.turn-idx { color: #8a93a6; font-size: 0.72rem; margin-left: 0.4rem; }
+
+.body-text { margin: 0.25rem 0; }
+.provenance { color: #5a6479; font-size: 0.82rem; margin: 0.35rem 0 0; }
+
+.analysis-entry { border-top: 1px solid #eceff5; padding: 0.6rem 0; }
+.analysis-entry:first-child { border-top: none; }
+.analysis-type { font-weight: 600; }
+.badge {
+  display: inline-block;
+  font-size: 0.72rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 4px;
+  margin-left: 0.4rem;
+  background: #eef1f7;
+  color: #3a4252;
+}
+.badge.authoritative { background: #dff3e6; color: #157347; }
+.badge.degraded { background: #fde2d2; color: #9a3b12; }
+
+[hidden] { display: none !important; }

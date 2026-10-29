@@ -83,11 +83,21 @@ def create_app(
 
     @app.post("/api/token")
     def mint_token(req: TokenRequest) -> Dict[str, Any]:
-        """Mint a LiveKit patient access token for the Start-call flow."""
+        """Mint a LiveKit patient access token for the Start-call flow.
+
+        The LiveKit server ``url`` is returned alongside the token (read from
+        the SAME ``.env`` the agent uses) so the browser client never hardcodes
+        the server URL and always targets the same LiveKit server as the agent.
+        """
         token = records_mod.mint_patient_token(
             req.room, req.identity, name=req.name, env=env
         )
-        return {"token": token, "room": req.room, "identity": req.identity}
+        return {
+            "token": token,
+            "room": req.room,
+            "identity": req.identity,
+            "url": env.get(records_mod.ENV_LIVEKIT_URL) or "",
+        }
 
     @app.get("/api/records")
     def list_records() -> Dict[str, Any]:
