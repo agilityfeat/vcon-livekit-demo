@@ -8,11 +8,10 @@ with one command, exposes the identifiers the local app needs as stack
 Most Lambda code is inlined, IAM is kept broad for readability, and the single
 exception is the **Seal** step, which is a packaged (container-built)
 `AWS::Serverless::Function` so it can ship its native `jwcrypto` / `cryptography`
-dependency and import the authoritative sealing core directly. The template now
+dependency and import the authoritative sealing core directly. The template
 carries the SAM transform (`Transform: AWS::Serverless-2016-10-31`) for that one
-function, so it is deployed with AWS SAM (`sam build` + `sam deploy`) rather than
-a bare `aws cloudformation deploy`. The shortcuts and their production
-counterparts are listed at the end.
+function, so the stack is deployed with AWS SAM (`sam build` + `sam deploy`). The
+shortcuts and their production counterparts are listed at the end.
 
 **Why Step Functions over a single Lambda.** Transcribe Medical batch is an
 asynchronous job that can run longer than Lambda's hard 15-minute timeout. If a
@@ -54,13 +53,12 @@ ever sleeps past its timeout.
 
 Bedrock model access is a one-time, account-level enablement, not a
 CloudFormation resource, so you must set it up once before the `bedrock-step`
-can call Bedrock. The old console **Model access** page is no longer the flow
-in commercial regions:
+can call Bedrock. Model access works differently by region:
 
-- In **commercial regions** there is no longer a **Model access** console page
-  to toggle. Access to most foundation models is enabled automatically on the
-  first invocation (an auto-subscription happens in the background). The
-  **Model access** page under Bedrock configurations now applies to **AWS
+- In **commercial regions** access to most foundation models is enabled
+  automatically on the first invocation (an auto-subscription happens in the
+  background), so there is no **Model access** console page to toggle. The
+  **Model access** page under Bedrock configurations applies to **AWS
   GovCloud (US)** only.
 - **Anthropic** models (the default here) additionally require a **one-time
   First-Time-Use (FTU) use-case form** per account/organization, submitted
@@ -135,10 +133,9 @@ the dedicated `TranscriptionFailed` state.
 
 ## Deploy (AWS SAM)
 
-Because the Seal step is now a packaged `AWS::Serverless::Function` and the
+Because the Seal step is a packaged `AWS::Serverless::Function` and the
 template carries `Transform: AWS::Serverless-2016-10-31`, the stack is deployed
-with **AWS SAM** (`sam build` + `sam deploy`) instead of a bare
-`aws cloudformation deploy`.
+with **AWS SAM** (`sam build` + `sam deploy`).
 
 ### Prerequisites
 
@@ -182,7 +179,7 @@ sam deploy \
   --capabilities CAPABILITY_NAMED_IAM
 ```
 
-Optional parameter overrides (same parameters as before):
+Optional parameter overrides:
 
 ```bash
 sam deploy \
@@ -466,7 +463,7 @@ and carried its redacted pointer.
 
 ### What can be validated offline vs. what needs live AWS
 
-The template now carries a SAM transform (`Transform: AWS::Serverless-2016-10-31`)
+The template carries a SAM transform (`Transform: AWS::Serverless-2016-10-31`)
 for the packaged Seal function, so the offline checks include a SAM-aware lint.
 
 - **Validated offline:** the full pytest suite is green
@@ -479,7 +476,7 @@ for the packaged Seal function, so the offline checks include a SAM-aware lint.
   compiles cleanly (`python3 -m py_compile`).
 - **Requires live AWS credentials (and Docker):** `sam build --use-container`
   (compiles the Seal function's native `cryptography` wheel for the Lambda
-  runtime), `sam deploy` (replaces the old `aws cloudformation deploy`), running
+  runtime), `sam deploy` (deploys the stack), running
   the agent to produce a vCon, and `./infrastructure/scripts/validate-live.sh`.
   The underlying `aws stepfunctions start-execution`,
   `aws cloudformation describe-stacks`, and `aws cloudformation delete-stack`

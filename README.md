@@ -498,10 +498,9 @@ defers the vetted de-identification surface to that production direction.
 **vCon conformance of the redacted sibling.** Two behaviors align the redacted
 sibling with the container draft's section 4.1.6:
 
-- The redacted sibling is a **signed vCon (JWS)** rather than bare JSON, signed
-  with the same demo RSA key (`PS256`) used for the full signed copy. This
-  follows the draft's "the redactor SHOULD sign the redacted version of the
-  vCon".
+- The redacted sibling is a **signed vCon (JWS)**, signed with the same demo RSA
+  key (`PS256`) used for the full signed copy. This follows the draft's "the
+  redactor SHOULD sign the redacted version of the vCon".
 - The top-level `redacted` pointer carries a **`content_hash`** of the referenced
   encrypted full copy (`vcon-full.jwe`), alongside its `uuid`, `type`, and `url`.
   This follows the draft's "url SHOULD be included unless redacted and
