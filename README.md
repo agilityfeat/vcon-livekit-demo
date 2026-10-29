@@ -15,7 +15,7 @@ documents.
 - **Demo application** — a single, locally-runnable app (FastAPI backend +
   vanilla multi-page frontend) where a human patient places a real intake call
   to the bot from the browser, and doctor / analyst roles review the produced
-  vCon records. See **[frontend/README.md](frontend/README.md)** for the
+  vCon records. See **[docs/demo-app.md](docs/demo-app.md)** for the
   end-to-end run story and the demo shortcuts.
 
 ## Infrastructure
@@ -517,101 +517,16 @@ sibling with the container draft's section 4.1.6:
 ## End-to-end demo application
 
 Everything above is tied together by a single, locally-runnable **demo
-application** (FastAPI backend + a vanilla HTML/CSS/JS multi-page frontend, no
-build step) that shows the whole vCon value chain from one app that looks like a
-real product. A human patient places a **real** intake call to the bot from the
-browser, and **doctor** and **analyst** roles review the vCon records the
-pipeline produces. The backend reads the S3 artifacts, **verifies the JWS and
-decrypts the JWE server-side** with the demo signing key, and serves readable
-vCon JSON, so the browser never touches the key or any JOSE. The pages, the
-frontend↔backend contract, and how to regenerate the offline fixtures are
-documented in **[frontend/README.md](frontend/README.md)**.
+application** that shows the whole vCon value chain from one app that looks like
+a real product. A **human patient** places a **real** intake call to the bot
+from the browser, and **doctor** and **analyst** roles asynchronously review the
+vCon records the pipeline produces. The backend does all the crypto server-side
+(**verifies the JWS and decrypts the JWE** with the demo signing key) and serves
+readable vCon JSON, so the browser never touches the key.
 
-### Run it end to end (live)
-
-The live path uses the **real credentials** already in `.env` (the same LiveKit,
-AWS, and signing-key values the agent uses — nothing new to configure). The
-AWS pipeline (S3 bucket, Step Functions, the Lambdas, and the seal step) must be
-deployed and reachable. In two terminals from the repo root:
-
-```bash
-# 1. The LiveKit agent worker, so the bot is in the room to answer the call.
-python -m vcon_agent.agent dev
-
-# 2. The demo backend, which also serves the frontend as static files.
-pip install -e '.[app]'
-PYTHONPATH=src:infrastructure/functions/seal uvicorn vcon_agent.app.main:app
-```
-
-Then open the served app at <http://127.0.0.1:8000/> and:
-
-1. The **patient** (a human — this is the manual task you perform and record)
-   clicks **Start call** and talks to the bot in the browser. The mic is
-   published to the same LiveKit room the agent worker auto-joins, so the
-   Start-call button is **not inert**: it places a genuine patient ↔ bot call.
-2. That call is recorded, enriched, signed, encrypted, and redacted by the
-   deployed pipeline + seal step, producing the **real** vCon artifacts in S3
-   (`vcon-signed.jws`, `vcon-full.jwe`, `vcon-redacted.jws` under the run
-   prefix).
-3. On the **Records** page the run appears once the pipeline finishes.
-4. The **doctor** view loads the decrypted + verified **FULL** record: the
-   speaker-attributed transcript, the physician summary, and the
-   medication → exact-audio-moment provenance (clicking a medication seeks the
-   audio element to the dialog turn it came from).
-5. The **analyst** view loads the verified **REDACTED** record and shows it is
-   the **same vCon** via the standard `redacted` pointer (the redacted copy's
-   `redacted.uuid` matches the full copy's `uuid`).
-
-### Offline fixture fallback (viewer side, no call, no AWS)
-
-Leave `BUCKET_NAME` **unset** and the backend serves one synthetic record from
-the committed sample fixture pair under `frontend/fixtures/`. The **Records**
-list and the **doctor** / **analyst** views then render with no live call and no
-AWS, so the viewer side is demoable on its own. The fixtures are produced by
-running the authoritative seal core over a representative enriched vCon, so they
-carry main's real redacted/JOSE pointer shape; regenerate them with the
-generator script documented in **[frontend/README.md](frontend/README.md)**.
-(The Start-call page itself still needs real LiveKit creds to connect.)
-
-### What is REAL vs. STUBBED
-
-- **REAL:** the browser patient ↔ bot intake call; the vCon artifacts in S3 via
-  the deployed pipeline + seal step; the doctor/analyst **server-side verify +
-  decrypt** and the readable JSON served to each view.
-- **STUBBED (by design):** authentication / authorization — there is no login,
-  and the role is just which page/route you open (a UI toggle). And the **live
-  human doctor** — the intake is patient ↔ bot, and the doctor is an
-  **asynchronous viewer** of the produced record, not a second live participant.
-
-### Shortcuts (demo) vs. production
-
-- 🩹 **No authentication; the role is a UI toggle.** Doctor vs. analyst is just
-  which page/route you open, so anyone who can reach the backend can read either
-  view. → *Production:* real authN/authZ (OIDC + per-role scopes), the full
-  (decrypted) view gated to authorized clinicians and audit-logged.
-- 🩹 **Single-process local app.** One `uvicorn` process serves both the API and
-  the static frontend. → *Production:* a separately deployed, horizontally
-  scalable API behind a gateway, and the frontend served from a CDN/static host.
-- 🩹 **CDN-loaded LiveKit browser client** (ESM) for a no-build demo, with the
-  patient identity / room chosen client-side. → *Production:* a pinned, bundled
-  client served from your own origin, with server-minted tokens bound to a
-  verified record.
-- 🩹 **Demo signing key from `.env`, not KMS.** The same self-signed demo key is
-  used for JWS and JWE and is read from the local environment. → *Production:*
-  AWS KMS / ACM PCA, key rotation, HSM-backed signing, a separate JWE key with
-  least privilege, and never shipping keys with the app.
-- 🩹 **The backend holds the demo key and does all crypto server-side.** It
-  verifies the JWS and decrypts the JWE itself so the browser never sees the key.
-  → *Production:* a managed key service with scoped, audited decryption, and the
-  full record released only to authorized, authenticated clinicians.
-- 🩹 **Records are discovered by an S3 prefix scan** (or the single offline
-  fixture), not a records index. → *Production:* a queryable records index
-  (e.g. DynamoDB) written by the pipeline, with per-role access scoping.
-- 🩹 **No pagination** on the records list. → *Production:* paginated, filterable
-  listing backed by that index.
-- 🩹 **The live human doctor is stubbed** (the doctor is an asynchronous viewer;
-  the intake is patient ↔ bot only). → *Production:* real live consultations
-  and/or a clinician queue, with the record still produced for the audit trail.
+See **[docs/demo-app.md](docs/demo-app.md)** for the run story (live + offline),
+the frontend↔backend layout, fixture regeneration, and the acknowledged
+shortcuts.
 
 ## Compliance
 
