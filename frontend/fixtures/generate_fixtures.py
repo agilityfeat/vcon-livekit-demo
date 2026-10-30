@@ -194,7 +194,18 @@ def build_enriched_vcon() -> dict:
         dialog_indices=[0, 1, 2, 3],
     )
 
-    return builder.to_dict()
+    vcon = builder.to_dict()
+
+    # DEMO-ONLY FAKE PATIENT NAME. The builder seeds a generic placeholder name
+    # ('Patient'); set a realistic FAKE full name here so the redacted/analyst
+    # view visibly demonstrates the deny-by-default name masking: a party name is
+    # PHI by nature, so the seal core HARD-REPLACES parties[].name with
+    # '[REDACTED]' (role preserved). This is obviously-fake demo data, never a
+    # real person, and only affects the committed demo fixture. The agent name
+    # stays the generic role label.
+    vcon["parties"][0]["name"] = "Jordan Rivera"
+
+    return vcon
 
 
 def _build_transcribe_medical_result() -> dict:

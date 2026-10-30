@@ -80,11 +80,11 @@
       "granted": true,
       "party": 0,
       "script": "This call will be recorded and transcribed to assist with your intake. Do you consent to recording and processing of this conversation?",
-      "timestamp": "2026-10-30T22:21:47.608980+00:00",
+      "timestamp": "2026-10-30T22:41:58.497758+00:00",
       "type": "consent"
     }
   ],
-  "created_at": "2026-10-30T22:21:47.608965+00:00",
+  "created_at": "2026-10-30T22:41:58.497745+00:00",
   "dialog": [
     {
       "body": "Hi, thanks for calling. What brings you in today?",
@@ -144,7 +144,7 @@
   ],
   "parties": [
     {
-      "name": "Patient",
+      "name": "Jordan Rivera",
       "role": "patient"
     },
     {
@@ -153,6 +153,6 @@
     }
   ],
   "subject": "Patient intake call (demo fixture)",
-  "uuid": "a2f17a18-bd6a-47d9-aea6-bf8502d36ce8",
+  "uuid": "95ba4874-0645-496e-9cea-9734cdeef1a5",
   "vcon": "0.0.1"
 }
