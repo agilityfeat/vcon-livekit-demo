@@ -376,6 +376,35 @@ def _redact_entities(
     return redacted
 
 
+def _redact_turns(
+    turns: Sequence[Dict[str, Any]], detect_phi: Optional[DetectPhi]
+) -> List[Dict[str, Any]]:
+    """Redact the ``text`` of each turn dict in an analysis entry's ``turns``.
+
+    The structured-transcript feature stores the authoritative Transcribe Medical
+    transcript as a ``turns`` list of ``{party, speaker, start, end, text}`` dicts
+    on the transcript analysis entry (in addition to the flat ``body``), and the
+    record view renders the clinical transcript from ``turns[].text``. So the
+    per-turn text is PHI-bearing and MUST be masked exactly like the bodies, or
+    the de-identified analyst view leaks PHI through the authoritative transcript.
+
+    Mirroring :func:`_redact_entities`: this keeps the list length and each turn's
+    other keys (``party``, ``speaker``, ``start``, ``end``) intact so structure is
+    preserved; only the ``text`` value is run through :func:`_redact_text`.
+    Non-dict items are passed through unchanged.
+    """
+    redacted: List[Dict[str, Any]] = []
+    for turn in turns:
+        if isinstance(turn, dict):
+            new_turn = dict(turn)
+            if isinstance(new_turn.get("text"), str):
+                new_turn["text"] = _redact_text(new_turn["text"], detect_phi)
+            redacted.append(new_turn)
+        else:
+            redacted.append(turn)
+    return redacted
+
+
 def redact_vcon(
     vcon_doc: Dict[str, Any],
     full_reference: Dict[str, Any],
@@ -387,9 +416,11 @@ def redact_vcon(
     The returned document keeps the STRUCTURE intact: the same top-level keys, the
     same ``parties`` / ``dialog`` / ``analysis`` / ``attachments`` shape and
     ordering, and the same party indices. Sensitive content in the dialog turn
-    ``body`` text and the analysis ``body`` (both free-text summaries/transcripts
-    and ``entities`` entity ``text``) is replaced with :data:`REDACTION_PLACEHOLDER`
-    rather than dropped, so a consumer sees where redaction happened.
+    ``body`` text, the analysis ``body`` (both free-text summaries/transcripts
+    and ``entities`` entity ``text``), and the analysis ``turns[].text`` of the
+    authoritative structured transcript is replaced with
+    :data:`REDACTION_PLACEHOLDER` rather than dropped, so a consumer sees where
+    redaction happened.
 
     Redaction combines a NAIVE regex pass (emails, phone numbers, SSN-like digit
     runs) with optional injected PHI spans:
@@ -443,6 +474,16 @@ def redact_vcon(
         elif isinstance(body, list):
             # entities body: a list of {category, text, score?} dicts.
             entry["body"] = _redact_entities(body, effective_detect_phi)
+        # The structured-transcript feature stores the authoritative transcript
+        # as a `turns` list ({party, speaker, start, end, text}) on the transcript
+        # analysis entry IN ADDITION to the flat `body`, and the record view
+        # renders the clinical transcript from turns[].text. Mask each turn's
+        # text with the SAME PHI coverage as the bodies so the de-identified view
+        # does not leak PHI through the authoritative transcript. Applied to ANY
+        # analysis entry carrying a `turns` list, not just type=='transcript',
+        # for safety/generality.
+        if isinstance(entry.get("turns"), list):
+            entry["turns"] = _redact_turns(entry["turns"], effective_detect_phi)
 
     # The redacted copy carries the pointer back to the full signed version.
     redacted["redacted"] = dict(full_reference)

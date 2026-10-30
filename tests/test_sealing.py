@@ -367,3 +367,68 @@ def test_redaction_accepts_detect_phi_callable():
     redacted = redact_vcon(doc, ref, detect_phi=fake_detect_phi)
     assert "Robert Roe" not in redacted["dialog"][0]["body"]
     assert REDACTION_PLACEHOLDER in redacted["dialog"][0]["body"]
+
+
+def test_redaction_masks_authoritative_transcript_turns_text():
+    # The structured-transcript feature stores the authoritative Transcribe
+    # Medical transcript as a `turns` list ({party, speaker, start, end, text})
+    # on the transcript analysis entry, and the record view renders the clinical
+    # transcript from turns[].text. redact_vcon MUST mask turns[].text with the
+    # SAME PHI coverage as the bodies, or the de-identified analyst view leaks
+    # PHI through the authoritative transcript.
+    turn_text = "My name is Jane Smith and I have a headache."
+    doc = {
+        "uuid": "turns-uuid-1",
+        "parties": [{"role": "patient"}, {"role": "provider"}],
+        "dialog": [],
+        "analysis": [
+            {
+                "type": "transcript",
+                "dialog": [0],
+                # Flat body (already covered) plus the authoritative turns.
+                "body": "transcript body",
+                "turns": [
+                    {
+                        "party": 0,
+                        "speaker": "patient",
+                        "start": 0.0,
+                        "end": 3.5,
+                        "text": turn_text,
+                    },
+                    {
+                        "party": 1,
+                        "speaker": "provider",
+                        "start": 3.5,
+                        "end": 5.0,
+                        "text": "How long has that been going on?",
+                    },
+                ],
+            }
+        ],
+    }
+
+    # Canned span targeting the "Jane Smith" substring (the DetectPHI mirror seam):
+    # no regex-matchable PII, so only the turns-aware masking can remove it.
+    spans = {
+        turn_text: [
+            (turn_text.index("Jane Smith"), turn_text.index("Jane Smith") + len("Jane Smith"))
+        ]
+    }
+
+    ref = build_redacted_reference(doc["uuid"])
+    redacted = redact_vcon(doc, ref, phi_spans=spans)
+
+    # The PHI substring is gone from the authoritative transcript turns.
+    assert "Jane Smith" not in json.dumps(redacted)
+    masked_turn = redacted["analysis"][0]["turns"][0]
+    assert REDACTION_PLACEHOLDER in masked_turn["text"]
+    assert masked_turn["text"] == f"My name is {REDACTION_PLACEHOLDER} and I have a headache."
+
+    # Structure preserved: the turn keeps all its non-text keys unchanged.
+    assert masked_turn["party"] == 0
+    assert masked_turn["speaker"] == "patient"
+    assert masked_turn["start"] == 0.0
+    assert masked_turn["end"] == 3.5
+    # The list length and other turns are preserved (non-PII text intact).
+    assert len(redacted["analysis"][0]["turns"]) == 2
+    assert redacted["analysis"][0]["turns"][1]["text"] == "How long has that been going on?"

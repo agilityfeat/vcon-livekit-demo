@@ -80,11 +80,11 @@
       "granted": true,
       "party": 0,
       "script": "This call will be recorded and transcribed to assist with your intake. Do you consent to recording and processing of this conversation?",
-      "timestamp": "2026-10-30T20:43:31.821082+00:00",
+      "timestamp": "2026-10-30T22:21:47.608980+00:00",
       "type": "consent"
     }
   ],
-  "created_at": "2026-10-30T20:43:31.821069+00:00",
+  "created_at": "2026-10-30T22:21:47.608965+00:00",
   "dialog": [
     {
       "body": "Hi, thanks for calling. What brings you in today?",
@@ -153,12 +153,12 @@
     }
   ],
   "redacted": {
-    "content_hash": "sha512-Trt7JVWVT0pJyxu766JxlCE62ZxSA6nTxC4tlmkd3QI0qmucjn5ZxxI1Zi_VX0EBYFBazVSE4f59BSnquDS5BA",
+    "content_hash": "sha512-SzwHl0C_KHBMy9Khsi_WiOWOHhrtNQ45-G3HVt281biZ77r0kS0rnPLeXiz5suczBWufSQkJHH1kEINQWnTaQQ",
     "type": "application/vcon+jws",
     "url": "s3://demo-bucket/fixtures/sample-call/vcon-full.jwe",
-    "uuid": "69a09cc7-9e7e-4d43-9dc9-dee0dc06bbf3"
+    "uuid": "a2f17a18-bd6a-47d9-aea6-bf8502d36ce8"
   },
   "subject": "Patient intake call (demo fixture)",
-  "uuid": "69a09cc7-9e7e-4d43-9dc9-dee0dc06bbf3",
+  "uuid": "a2f17a18-bd6a-47d9-aea6-bf8502d36ce8",
   "vcon": "0.0.1"
 }
