@@ -158,8 +158,11 @@ def test_list_records_derives_prefixes_and_keys():
     )
     descriptors = rec.list_records(s3, BUCKET)
 
-    assert [d.run_prefix for d in descriptors] == ["room-a/ts-1", "room-b/ts-2"]
-    first = descriptors[0]
+    # Newest session_start first: 'ts-2' sorts ahead of 'ts-1'.
+    assert [d.run_prefix for d in descriptors] == ["room-b/ts-2", "room-a/ts-1"]
+    # Keys are derived from each run prefix regardless of order.
+    by_prefix = {d.run_prefix: d for d in descriptors}
+    first = by_prefix["room-a/ts-1"]
     assert first.room == "room-a"
     assert first.session_start == "ts-1"
     assert first.signed_key == "room-a/ts-1/vcon-signed.jws"
@@ -167,6 +170,54 @@ def test_list_records_derives_prefixes_and_keys():
     assert first.redacted_key == "room-a/ts-1/vcon-redacted.jws"
     # The list was scoped to the injected bucket.
     assert s3.list_calls[0]["Bucket"] == BUCKET
+
+
+def test_list_records_sorts_newest_session_start_first():
+    """Records are returned newest session_start first, keyed on the ISO
+    instant after the last '/', NOT a plain reverse sort of the whole prefix
+    (which would sort by room first). ISO-8601 sorts lexically ===
+    chronologically, so the newest timestamp leads regardless of room name."""
+    s3 = FakeS3Client(
+        listing=_canned_listing(
+            # Deliberately out of order, with room names whose lexical order
+            # would disagree with the chronological session_start order.
+            "zeta-room/2024-01-01T08:00:00+00:00",
+            "alpha-room/2024-03-15T09:30:00+00:00",
+            "mid-room/2024-02-10T12:00:00+00:00",
+        ),
+    )
+    descriptors = rec.list_records(s3, BUCKET)
+
+    # Newest session_start first (March, then February, then January) even
+    # though 'alpha-room' < 'mid-room' < 'zeta-room' lexically.
+    assert [d.session_start for d in descriptors] == [
+        "2024-03-15T09:30:00+00:00",
+        "2024-02-10T12:00:00+00:00",
+        "2024-01-01T08:00:00+00:00",
+    ]
+    assert [d.run_prefix for d in descriptors] == [
+        "alpha-room/2024-03-15T09:30:00+00:00",
+        "mid-room/2024-02-10T12:00:00+00:00",
+        "zeta-room/2024-01-01T08:00:00+00:00",
+    ]
+
+
+def test_list_records_stable_tiebreak_on_shared_session_start():
+    """When two runs share a session_start, the full run prefix is a stable
+    descending tiebreak so the order is deterministic."""
+    shared = "2024-05-05T05:05:05+00:00"
+    s3 = FakeS3Client(
+        listing=_canned_listing(
+            "room-a/" + shared,
+            "room-b/" + shared,
+        ),
+    )
+    descriptors = rec.list_records(s3, BUCKET)
+    # Same session_start -> descending tiebreak on the full prefix: room-b wins.
+    assert [d.run_prefix for d in descriptors] == [
+        "room-b/" + shared,
+        "room-a/" + shared,
+    ]
 
 
 def test_list_records_ignores_unrelated_objects():

@@ -270,10 +270,30 @@ audio { width: 100%; }
 }
 .dialog li.patient { background: #f3f8f3; }
 .dialog li.agent { background: #f4f6fb; }
+/* The provenance jump target. It keeps a persistent blue emphasis (border +
+   tint + ring) so the user can still see WHICH turn was jumped to, and plays a
+   one-shot flash the moment the class is (re)applied so the jump is obvious
+   even when the audio can't play (analyst view / offline). Re-adding the class
+   restarts the animation because highlightTurn removes it from every li first. */
 .dialog li.highlight {
   border-color: #1f6feb;
   background: #e6f0ff;
   box-shadow: 0 0 0 2px rgba(31, 111, 235, 0.25);
+  animation: turn-flash 0.9s ease-out 1;
+}
+@keyframes turn-flash {
+  0% {
+    background: #ffe9a8;
+    box-shadow: 0 0 0 4px rgba(31, 111, 235, 0.55);
+  }
+  60% {
+    background: #fff6d6;
+    box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.4);
+  }
+  100% {
+    background: #e6f0ff;
+    box-shadow: 0 0 0 2px rgba(31, 111, 235, 0.25);
+  }
 }
 .speaker { font-weight: 600; margin-right: 0.4rem; }
 .turn-time { color: #5a6479; font-size: 0.78rem; margin-left: 0.4rem; }
@@ -322,9 +342,6 @@ audio { width: 100%; }
 }
 .live-transcript-panel > h2 { color: #5a6479; font-weight: 600; }
 
-.analysis-entry { border-top: 1px solid #eceff5; padding: 0.6rem 0; }
-.analysis-entry:first-child { border-top: none; }
-.analysis-type { font-weight: 600; }
 .badge {
   display: inline-block;
   font-size: 0.72rem;

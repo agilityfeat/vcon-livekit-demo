@@ -227,7 +227,14 @@ def list_records(
     ``vcon-signed.jws`` and derives each record's run-key prefix
     (``<room>/<session_start_iso>``) from the object key, exactly like the seal
     step derives the prefix from the recording key. One descriptor is returned
-    per run, sorted by prefix for a stable list.
+    per run, sorted NEWEST session_start first.
+
+    Ordering note: the run prefix is ``<room>/<session_start_iso>``, so a plain
+    reverse-lexical sort of the whole prefix would sort by ROOM first and only
+    then by session_start. "Newest first" instead keys on the ``session_start``
+    segment (the ISO-8601 instant after the last '/') sorted descending --
+    ISO-8601 sorts lexically the same as chronologically. Records that share a
+    session_start fall back to a stable descending tiebreak on the full prefix.
 
     ``s3_client`` is INJECTED (tests pass a fake returning canned
     ``list_objects_v2`` pages), so this stays pure and offline-testable.
@@ -251,8 +258,14 @@ def list_records(
         if run_prefix and run_prefix not in seen:
             seen.add(run_prefix)
             prefixes.append(run_prefix)
-    prefixes.sort()
-    return [_descriptor_for_prefix(p) for p in prefixes]
+    descriptors = [_descriptor_for_prefix(p) for p in prefixes]
+    # Newest first: sort by the session_start ISO instant descending (ISO-8601
+    # sorts lexically === chronologically), with the full run prefix as a stable
+    # descending tiebreak when two runs share a session_start.
+    descriptors.sort(
+        key=lambda d: (d.session_start, d.run_prefix), reverse=True
+    )
+    return descriptors
 
 
 def presigned_recording_url(

@@ -119,7 +119,6 @@ function render() {
   renderSummary(doc);
   renderClinicalTranscript(doc);
   renderDialog(doc);
-  renderAnalysis(doc);
 }
 
 function renderLinkBanner() {
@@ -351,34 +350,114 @@ function renderMeds(doc) {
 }
 
 /**
- * Headline payoff: resolve an entities entry to the dialog turn start and seek
- * the audio element there, highlighting/scrolling to the provenance turn.
+ * Headline payoff: clicking a medication jumps to where it was mentioned.
+ *
+ * The click must ALWAYS produce visible feedback. The provenance chain is
+ * entities entry -> first dialog turn index -> that turn's `start`. We resolve
+ * the turn index independently of the numeric start so the two headline
+ * behaviors degrade gracefully:
+ *
+ *   1) We ALWAYS highlight + scroll to the provenance dialog turn (the user
+ *      SEES the jump in the live transcript panel), and set a clear status.
+ *   2) If the turn's `start` is a usable number we ALSO seek the audio element
+ *      and try to play. But on real calls the live agent records ISO-string
+ *      starts that `shape_record_for_frontend` cannot coerce to a float, so
+ *      `resolveEntityStartSeconds` returns null -- in that case we skip the
+ *      seek and tell the user audio position isn't available, WITHOUT bailing
+ *      out of the highlight.
+ *   3) In the analyst view the audio is deliberately withheld (no src), and in
+ *      offline/demo mode the <audio> may have no playable source. Either way
+ *      the highlight + status still happen, so the click never looks dead.
+ *
+ * Status is set via setStatus (textContent), so it stays XSS-safe even though
+ * the medication name comes from record data.
  */
 function seekToEntity(doc, entitiesEntryIndex) {
-  var start = resolveEntityStartSeconds(doc, entitiesEntryIndex);
-  var turnIndex = firstDialogTurnIndex(doc.analysis[entitiesEntryIndex]);
-  if (start == null) {
-    setStatus('Could not resolve a numeric start time for that medication.', 'error');
+  var entry = (doc.analysis || [])[entitiesEntryIndex] || {};
+  var turnIndex = firstDialogTurnIndex(entry);
+  var medName = medicationLabelForEntitiesEntry(entry);
+
+  // Always try to make the provenance turn visible first. highlightTurn no-ops
+  // safely if there is no matching <li> (e.g. turnIndex is null).
+  highlightTurn(doc, turnIndex);
+
+  if (turnIndex == null) {
+    // No provenance turn recorded at all: say so plainly instead of throwing.
+    setStatus(
+      'No dialog-turn provenance is recorded for ' + medName + '.',
+      'error'
+    );
     return;
   }
-  if (audioEl) {
+
+  var start = resolveEntityStartSeconds(doc, entitiesEntryIndex);
+
+  if (start == null) {
+    // Non-numeric / missing start (e.g. an ISO timestamp from a live call):
+    // we cannot seek, but the turn IS highlighted, so give an informative
+    // status rather than failing silently.
+    setStatus(
+      'Jumped to where ' + medName + ' was mentioned (dialog turn #' +
+      turnIndex + '). Audio position isn\u2019t available for this record.',
+      'ok'
+    );
+    return;
+  }
+
+  // Numeric start: seek the audio if we can. The highlight already happened, so
+  // even when the media can\u2019t actually play (analyst view withholds audio;
+  // no src / not seekable offline) the user still sees the jump + a status.
+  var audioSeeked = false;
+  if (audioEl && audioEl.getAttribute('src')) {
     try {
       audioEl.currentTime = start;
+      audioSeeked = true;
       var playPromise = audioEl.play();
       if (playPromise && typeof playPromise.catch === 'function') {
         playPromise.catch(function () { /* no audio / autoplay blocked — fine */ });
       }
-    } catch (e) { /* ignore: media may not be ready */ }
+    } catch (e) { /* ignore: media may not be ready / seekable */ }
   }
-  highlightTurn(doc, turnIndex);
+
   var turn = (doc.dialog || [])[turnIndex] || {};
   var dur = typeof turn.duration === 'number' ? turn.duration : null;
-  setStatus(
-    'Seeked audio to ' + start.toFixed(1) + 's' +
-    (dur != null ? ' (window ' + start.toFixed(1) + '–' + (start + dur).toFixed(1) + 's)' : '') +
-    ' — dialog turn #' + turnIndex + '.',
-    'ok'
-  );
+  var window_ = dur != null
+    ? ' (window ' + start.toFixed(1) + '\u2013' + (start + dur).toFixed(1) + 's)'
+    : '';
+  if (audioSeeked) {
+    setStatus(
+      'Seeked audio to ' + start.toFixed(1) + 's' + window_ +
+      ' \u2014 ' + medName + ', dialog turn #' + turnIndex + '.',
+      'ok'
+    );
+  } else {
+    // We have a time but no playable audio here. Still a successful jump.
+    setStatus(
+      'Jumped to where ' + medName + ' was mentioned at ' + start.toFixed(1) +
+      's' + window_ + ' (dialog turn #' + turnIndex + '). Audio isn\u2019t ' +
+      'available in this view.',
+      'ok'
+    );
+  }
+}
+
+/**
+ * Best-effort human label for the medication an entities entry's click targets.
+ *
+ * The entities entry's `body` is the list of extracted entities; the first
+ * MEDICATION's `text` is the clicked chip's label. Falls back to the first
+ * entity's text, then a generic word, so the status always names something.
+ * Pure string read -- the caller renders it via textContent (XSS-safe).
+ */
+function medicationLabelForEntitiesEntry(entry) {
+  var items = (entry && Array.isArray(entry.body)) ? entry.body : [];
+  for (var i = 0; i < items.length; i++) {
+    if (items[i] && items[i].category === 'MEDICATION' && items[i].text) {
+      return items[i].text;
+    }
+  }
+  if (items.length && items[0] && items[0].text) return items[0].text;
+  return 'this medication';
 }
 
 function highlightTurn(doc, turnIndex) {
@@ -501,80 +580,6 @@ function renderDialog(doc) {
 
     ol.appendChild(li);
   });
-}
-
-function renderAnalysis(doc) {
-  var wrap = $('analysis');
-  wrap.innerHTML = '';
-  var analysis = doc.analysis || [];
-  if (analysis.length === 0) {
-    wrap.textContent = '(no analysis)';
-    return;
-  }
-  // The authoritative transcript now has its own prominent panel above, so skip
-  // it here to avoid showing the same transcript blob twice. Entities, summary,
-  // and any other analysis entries still render in this technical view.
-  var authoritativeTranscript = findAuthoritativeTranscript(doc);
-  var shown = 0;
-  analysis.forEach(function (entry) {
-    if (entry === authoritativeTranscript) return;
-    shown++;
-    var div = document.createElement('div');
-    div.className = 'analysis-entry';
-
-    var head = document.createElement('div');
-    var type = document.createElement('span');
-    type.className = 'analysis-type';
-    type.textContent = entry.type || '(untyped)';
-    head.appendChild(type);
-
-    if (entry.vendor) {
-      var vendor = document.createElement('span');
-      vendor.className = 'badge';
-      vendor.textContent = entry.vendor;
-      head.appendChild(vendor);
-    }
-    if (entry.authoritative) {
-      var auth = document.createElement('span');
-      auth.className = 'badge authoritative';
-      auth.textContent = 'authoritative';
-      head.appendChild(auth);
-    }
-    if (entry.degraded) {
-      var deg = document.createElement('span');
-      deg.className = 'badge degraded';
-      deg.textContent = 'degraded: ' + entry.degraded;
-      head.appendChild(deg);
-    }
-    div.appendChild(head);
-
-    if (Array.isArray(entry.dialog)) {
-      var prov = document.createElement('div');
-      prov.className = 'provenance';
-      prov.textContent = 'dialog turn provenance: ' + entry.dialog.join(', ');
-      div.appendChild(prov);
-    }
-
-    var body = document.createElement('div');
-    body.className = 'body-text';
-    if (Array.isArray(entry.body)) {
-      body.textContent = entry.body.map(function (e) {
-        return e.category + ': ' + e.text +
-          (typeof e.score === 'number' ? ' (' + e.score + ')' : '');
-      }).join('; ');
-    } else {
-      body.textContent = entry.body == null ? '' : String(entry.body);
-    }
-    div.appendChild(body);
-
-    wrap.appendChild(div);
-  });
-
-  // If the authoritative transcript was the only analysis entry, the generic
-  // section would otherwise render empty -- note that it moved to its panel.
-  if (shown === 0) {
-    wrap.textContent = '(no further analysis entries)';
-  }
 }
 
 /* ---------- init ---------- */
