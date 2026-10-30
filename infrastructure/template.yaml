@@ -430,6 +430,55 @@ Resources:
               "Patient reports a headache for three days and is taking ibuprofen."
           )
 
+          # 🩹 Demo stub: a canned Transcribe-Medical-shaped result that carries
+          # the SAME sentence as _CANNED_TRANSCRIPT but split across two speakers
+          # (spk_0 / spk_1) with word-level timings and a speaker_labels block, so
+          # the no-recording path still exercises the structured segments ->
+          # reconciliation -> turns flow end to end offline. GetTranscription's
+          # canned path turns this into transcript_segments; transcript_text stays
+          # _CANNED_TRANSCRIPT verbatim so the summary/comprehend source is
+          # unchanged. → Production: a real Transcribe Medical result (or AWS
+          # HealthScribe) with real diarized, timestamped segments.
+          _CANNED_TRANSCRIBE_RESULT = {
+              "results": {
+                  "transcripts": [{"transcript": _CANNED_TRANSCRIPT}],
+                  "items": [
+                      {"start_time": "0.0", "end_time": "0.4",
+                       "alternatives": [{"content": "Patient"}]},
+                      {"start_time": "0.4", "end_time": "0.7",
+                       "alternatives": [{"content": "reports"}]},
+                      {"start_time": "0.7", "end_time": "0.9",
+                       "alternatives": [{"content": "a"}]},
+                      {"start_time": "0.9", "end_time": "1.3",
+                       "alternatives": [{"content": "headache"}]},
+                      {"start_time": "1.3", "end_time": "1.6",
+                       "alternatives": [{"content": "for"}]},
+                      {"start_time": "1.6", "end_time": "1.9",
+                       "alternatives": [{"content": "three"}]},
+                      {"start_time": "1.9", "end_time": "2.3",
+                       "alternatives": [{"content": "days"}]},
+                      {"start_time": "2.3", "end_time": "2.6",
+                       "alternatives": [{"content": "and"}]},
+                      {"start_time": "2.6", "end_time": "2.8",
+                       "alternatives": [{"content": "is"}]},
+                      {"start_time": "2.8", "end_time": "3.2",
+                       "alternatives": [{"content": "taking"}]},
+                      {"start_time": "3.2", "end_time": "3.8",
+                       "alternatives": [{"content": "ibuprofen"}]},
+                      {"type": "punctuation",
+                       "alternatives": [{"content": "."}]},
+                  ],
+                  "speaker_labels": {
+                      "segments": [
+                          {"speaker_label": "spk_0", "start_time": "0.0",
+                           "end_time": "1.3"},
+                          {"speaker_label": "spk_1", "start_time": "1.3",
+                           "end_time": "3.8"},
+                      ]
+                  },
+              }
+          }
+
 
           def handler(event, context):
               vcon = event.get("vcon", event)
@@ -452,6 +501,18 @@ Resources:
                           Type="CONVERSATION",
                           Media={"MediaFileUri": "s3://{}/{}".format(bucket, key)},
                           OutputBucketName=bucket,
+                          # Request diarization so the result JSON carries
+                          # speaker_labels.segments (spk_0 = patient, spk_1 =
+                          # agent, reconciled downstream). MaxSpeakerLabels must be
+                          # >= 2 for the two-party intake call. NOTE: the exact
+                          # Settings shape for the MEDICAL transcription API must
+                          # be verified against a live job; if the medical API
+                          # uses a different key, swap to the documented medical
+                          # key here.
+                          Settings={
+                              "ShowSpeakerLabels": True,
+                              "MaxSpeakerLabels": 2,
+                          },
                       )
                       return {
                           "vcon": vcon,
@@ -474,7 +535,10 @@ Resources:
                           )
                       )
 
-              # Canned-transcript stub path.
+              # Canned-transcript stub path. Carry both the flat canned text
+              # (for transcript_text) and the canned Transcribe-shaped result
+              # (which GetTranscription parses into transcript_segments) so the
+              # structured turns path runs end to end offline.
               return {
                   "vcon": vcon,
                   "step": "start-transcription",
@@ -482,6 +546,7 @@ Resources:
                   "job_name": job_name,
                   "canned": True,
                   "canned_transcript": _CANNED_TRANSCRIPT,
+                  "canned_result": _CANNED_TRANSCRIBE_RESULT,
                   "transcription_canned_reason": canned_reason,
               }
       Tags:
@@ -538,6 +603,103 @@ Resources:
               return " ".join(parts).strip()
 
 
+          def _as_float(value):
+              # Mirror of enrichment._as_float: numeric/numeric-string -> float,
+              # ISO strings (and everything else) -> None.
+              if value is None or isinstance(value, bool):
+                  return None
+              if isinstance(value, (int, float)):
+                  return float(value)
+              if isinstance(value, str):
+                  try:
+                      return float(value)
+                  except ValueError:
+                      return None
+              return None
+
+
+          def _text_for_window(parsed_items, seg_start, seg_end):
+              # Mirror of enrichment._text_for_window: join the word items whose
+              # timing falls in [seg_start, seg_end]; punctuation (no timestamps)
+              # glues onto the preceding kept word with no leading space.
+              pieces = []
+              kept_previous_word = False
+              for item in parsed_items:
+                  if item["is_punct"]:
+                      if kept_previous_word and pieces:
+                          pieces[-1] = pieces[-1] + item["content"]
+                      continue
+                  start = item["start"]
+                  end = item["end"]
+                  if start is None:
+                      kept_previous_word = False
+                      continue
+                  word_end = end if end is not None else start
+                  if seg_start <= start and word_end <= seg_end:
+                      pieces.append(item["content"])
+                      kept_previous_word = True
+                  else:
+                      kept_previous_word = False
+              return " ".join(pieces).strip()
+
+
+          def _segments_from_transcribe_result(result_json):
+              # Mirror of enrichment.segments_from_transcribe_result: one dict per
+              # results.speaker_labels.segments[] entry
+              # ({'speaker','start','end','text'}), text rebuilt by bucketing the
+              # results.items[] word items into each segment's [start,end] window.
+              # Falls back to a single spk_0 flat-transcript segment when
+              # speaker_labels is missing/empty.
+              results = result_json.get("results") or {}
+              speaker_labels = results.get("speaker_labels") or {}
+              segments = speaker_labels.get("segments") or []
+              items = results.get("items") or []
+
+              flat_text = _transcript_text_from_transcribe_result(result_json)
+
+              if not segments:
+                  return [
+                      {"speaker": "spk_0", "start": None, "end": None,
+                       "text": flat_text}
+                  ]
+
+              parsed_items = []
+              for item in items:
+                  alternatives = item.get("alternatives") or []
+                  content = alternatives[0].get("content") if alternatives else ""
+                  is_punct = item.get("type") == "punctuation"
+                  start = _as_float(item.get("start_time"))
+                  end = _as_float(item.get("end_time"))
+                  parsed_items.append(
+                      {
+                          "start": start,
+                          "end": end,
+                          "content": content or "",
+                          "is_punct": is_punct,
+                      }
+                  )
+
+              out = []
+              for seg in segments:
+                  speaker = seg.get("speaker_label", "spk_0")
+                  seg_start = _as_float(seg.get("start_time"))
+                  seg_end = _as_float(seg.get("end_time"))
+                  text = ""
+                  if parsed_items and seg_start is not None and seg_end is not None:
+                      text = _text_for_window(parsed_items, seg_start, seg_end)
+                  if not text:
+                      text = flat_text
+                  out.append(
+                      {
+                          "speaker": speaker,
+                          "start": seg_start,
+                          "end": seg_end,
+                          "text": text,
+                      }
+                  )
+              return out
+
+
           def _s3_location_from_transcribe_uri(uri):
               if not isinstance(uri, str) or not uri:
                   return None
@@ -576,6 +738,16 @@ Resources:
               # report COMPLETED immediately with the canned text. → Production:
               # always poll the real job.
               if event.get("canned"):
+                  # Derive structured segments from the canned Transcribe-shaped
+                  # fixture carried by StartTranscription, keeping transcript_text
+                  # exactly the canned flat string so the summary/comprehend
+                  # source is unchanged.
+                  canned_result = event.get("canned_result") or {}
+                  canned_segments = (
+                      _segments_from_transcribe_result(canned_result)
+                      if canned_result
+                      else []
+                  )
                   return {
                       "vcon": vcon,
                       "step": "get-transcription",
@@ -583,11 +755,13 @@ Resources:
                       "job_name": event.get("job_name"),
                       "transcription_status": "COMPLETED",
                       "transcript_text": event.get("canned_transcript", ""),
+                      "transcript_segments": canned_segments,
                   }
 
               job_name = event.get("job_name")
               status = "FAILED"
               transcript_text = ""
+              transcript_segments = []
               try:
                   resp = _TRANSCRIBE.get_medical_transcription_job(
                       MedicalTranscriptionJobName=job_name
@@ -604,6 +778,12 @@ Resources:
                           transcript_text = _transcript_text_from_transcribe_result(
                               result_json
                           )
+                          # Parse speaker-labeled, timestamped segments from the
+                          # same result JSON and carry them ALONGSIDE the
+                          # unchanged transcript_text.
+                          transcript_segments = _segments_from_transcribe_result(
+                              result_json
+                          )
               except Exception:
                   status = "IN_PROGRESS"
 
@@ -616,6 +796,7 @@ Resources:
               }
               if status == "COMPLETED":
                   out["transcript_text"] = transcript_text
+                  out["transcript_segments"] = transcript_segments
               return out
       Tags:
         - Key: Project
@@ -711,6 +892,10 @@ Resources:
                   "entities": entities,
                   "entities_dialog_index": _first_patient_turn_index(vcon),
                   "transcript_text": transcript_text,
+                  # Re-emit verbatim so Step Functions carries the structured
+                  # segments from GetTranscription through to Merge (passed over
+                  # unchanged; only Merge reconciles them).
+                  "transcript_segments": event.get("transcript_segments"),
                   "entities_degraded": degraded,
               }
       Tags:
@@ -866,6 +1051,10 @@ Resources:
                   "recording_key": event.get("recording_key"),
                   "summary_text": summary_text,
                   "summary_dialog_indices": _dialog_indices(vcon),
+                  # Re-emit verbatim so Step Functions carries the structured
+                  # segments through this Analyze branch to Merge (unchanged;
+                  # only Merge reconciles them).
+                  "transcript_segments": event.get("transcript_segments"),
                   "summary_degraded": degraded,
               }
       Tags:
@@ -920,6 +1109,118 @@ Resources:
               ]
 
 
+          def _as_float(value):
+              # Mirror of enrichment._as_float: numeric/numeric-string -> float,
+              # ISO strings (and everything else) -> None (so ISO dialog starts
+              # are skipped by the overlap mapping below).
+              if value is None or isinstance(value, bool):
+                  return None
+              if isinstance(value, (int, float)):
+                  return float(value)
+              if isinstance(value, str):
+                  try:
+                      return float(value)
+                  except ValueError:
+                      return None
+              return None
+
+
+          def _map_turns_by_timestamp_overlap(medical_segments, dialog_turns):
+              # Mirror of enrichment.map_turns_by_timestamp_overlap: per segment,
+              # the dialog-turn indices whose [start,end) interval overlaps the
+              # segment's. Turns without a numeric start are skipped.
+              starts = []
+              for turn in dialog_turns:
+                  starts.append(_as_float(turn.get("start")))
+              intervals = []
+              for idx, turn in enumerate(dialog_turns):
+                  start = starts[idx]
+                  if start is None:
+                      intervals.append(None)
+                      continue
+                  end = _as_float(turn.get("end"))
+                  if end is None:
+                      end = float("inf")
+                      for later in starts[idx + 1:]:
+                          if later is not None and later > start:
+                              end = later
+                              break
+                  intervals.append((start, end))
+
+              mapped = []
+              for seg in medical_segments:
+                  seg_start = _as_float(seg.get("start"))
+                  seg_end = _as_float(seg.get("end"))
+                  if seg_start is None:
+                      mapped.append([])
+                      continue
+                  if seg_end is None:
+                      seg_end = seg_start
+                  covered = []
+                  for idx, interval in enumerate(intervals):
+                      if interval is None:
+                          continue
+                      t_start, t_end = interval
+                      if seg_start == seg_end:
+                          if t_start <= seg_start < t_end:
+                              covered.append(idx)
+                      elif seg_start < t_end and t_start < seg_end:
+                          covered.append(idx)
+                  mapped.append(covered)
+              return mapped
+
+
+          def _majority_party(tally):
+              # Mirror of enrichment._majority_party: strict-majority party, else
+              # None (empty tally or a tie -> None).
+              if not tally:
+                  return None
+              ordered = sorted(tally.items(), key=lambda kv: kv[1], reverse=True)
+              if len(ordered) >= 2 and ordered[0][1] == ordered[1][1]:
+                  return None
+              winner = ordered[0][0]
+              try:
+                  return int(winner)
+              except (TypeError, ValueError):
+                  return winner
+
+
+          def _reconcile_segments_to_parties(medical_segments, dialog_turns):
+              # Mirror of enrichment.reconcile_segments_to_parties: one structured
+              # turn per segment ({'party','speaker','start','end','text'}) with a
+              # consistent spk_N -> party majority mapping. When no dialog turn has
+              # a numeric start every party resolves to None and only the spk
+              # labels survive (documented fallback; we do NOT guess).
+              overlaps = _map_turns_by_timestamp_overlap(
+                  medical_segments, dialog_turns
+              )
+              votes = {}
+              for seg, covered in zip(medical_segments, overlaps):
+                  speaker = seg.get("speaker", "spk_0")
+                  tally = votes.setdefault(speaker, {})
+                  for idx in covered:
+                      party = dialog_turns[idx].get("party")
+                      if party is None:
+                          continue
+                      tally[party] = tally.get(party, 0) + 1
+              label_to_party = {}
+              for speaker, tally in votes.items():
+                  label_to_party[speaker] = _majority_party(tally)
+              turns = []
+              for seg in medical_segments:
+                  speaker = seg.get("speaker", "spk_0")
+                  turns.append(
+                      {
+                          "party": label_to_party.get(speaker),
+                          "speaker": speaker,
+                          "start": seg.get("start"),
+                          "end": seg.get("end"),
+                          "text": seg.get("text", ""),
+                      }
+                  )
+              return turns
+
+
           def handler(event, context):
               # The Parallel state hands us a list of branch outputs. Be tolerant
               # of also receiving a single envelope.
@@ -944,17 +1245,36 @@ Resources:
               transcript_text = comprehend.get("transcript_text", "") or ""
               covered = _text_dialog_indices(vcon)
 
-              # 1) transcript (authoritative clinical transcript, dual-transcript).
-              vcon["analysis"].append(
-                  {
-                      "type": "transcript",
-                      "vendor": "aws-transcribe-medical",
-                      "authoritative": True,
-                      "dialog": covered,
-                      "body": transcript_text,
-                      "mimetype": "text/plain",
-                  }
+              # Structured speaker segments thread through from GetTranscription
+              # via whichever Analyze branch re-emitted them. When present, build
+              # speaker-attributed turns by reconciling them to the party indices
+              # over the live dialog turns; party resolves to None (spk label
+              # only) when the live turns have no numeric starts to align against.
+              transcript_segments = (
+                  comprehend.get("transcript_segments")
+                  or bedrock.get("transcript_segments")
+                  or []
               )
+
+              # 1) transcript (authoritative clinical transcript, dual-transcript).
+              transcript_entry = {
+                  "type": "transcript",
+                  "vendor": "aws-transcribe-medical",
+                  "authoritative": True,
+                  "dialog": covered,
+                  "body": transcript_text,
+                  "mimetype": "text/plain",
+              }
+              # Additive: store reconciled structured turns alongside the flat
+              # body ONLY when segments are present, so older segment-less
+              # envelopes still produce the byte-identical flat-only entry.
+              if transcript_segments:
+                  turns = _reconcile_segments_to_parties(
+                      transcript_segments, vcon.get("dialog", [])
+                  )
+                  if turns:
+                      transcript_entry["turns"] = turns
+              vcon["analysis"].append(transcript_entry)
 
               # 2) entities (Comprehend Medical, meds + conditions). A
               # `degraded` marker is attached ONLY when the Comprehend branch
