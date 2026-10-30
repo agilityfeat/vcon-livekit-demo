@@ -11,7 +11,7 @@ and are regenerable and self-checking (see ``tests/test_fixtures.py``).
 
 What it writes into this directory:
 
-  * ``demo-signing-key.jwk``  -- the committed throwaway demo keypair (private
+  * ``demo-insecure-do-not-use.jwk``  -- the committed throwaway demo keypair (private
     JWK). Generated ONCE and committed so the committed JWE + its content_hash
     stay a consistent captured pair (the JWE carries a random nonce, so it is
     only byte-stable when produced once with a fixed key). THIS IS A DEMO-ONLY
@@ -37,7 +37,7 @@ shim the pytest suite uses):
     PYTHONPATH=.vconlib:src:infrastructure/functions/seal \
         python3 frontend/fixtures/generate_fixtures.py
 
-Re-running with the committed ``demo-signing-key.jwk`` present reuses that key
+Re-running with the committed ``demo-insecure-do-not-use.jwk`` present reuses that key
 (so the JWS/JWE are regenerated consistently). Delete the key file first to mint
 a brand-new throwaway key.
 
@@ -73,7 +73,7 @@ FIXTURES_DIR = Path(__file__).resolve().parent
 # The committed throwaway demo key (private JWK JSON). Kept in this directory so
 # the committed JWE + its content_hash are a consistent pair generated once with
 # a fixed key.
-KEY_FILE = FIXTURES_DIR / "demo-signing-key.jwk"
+KEY_FILE = FIXTURES_DIR / "demo-insecure-do-not-use.jwk"
 
 # Fixed run prefix the offline fallback advertises (see RecordsStore in
 # vcon_agent.app.records). The redacted pointer's s3:// url is built from it so

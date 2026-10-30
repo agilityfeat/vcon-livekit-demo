@@ -58,7 +58,7 @@ def _read(name):
 @pytest.fixture(scope="module")
 def demo_key():
     """The committed throwaway demo key the fixtures were sealed with."""
-    return load_jwk(_read("demo-signing-key.jwk"))
+    return load_jwk(_read("demo-insecure-do-not-use.jwk"))
 
 
 @pytest.fixture(scope="module")

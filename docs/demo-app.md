@@ -154,7 +154,7 @@ PYTHONPATH=.vconlib:src:infrastructure/functions/seal \
     python3 -m pytest tests/test_fixtures.py -q
 ```
 
-`frontend/fixtures/demo-signing-key.jwk` is a **throwaway demo key committed on purpose**
+`frontend/fixtures/demo-insecure-do-not-use.jwk` is a **throwaway demo key committed on purpose**
 so the committed JWE and its `content_hash` stay a consistent captured pair (the
 JWE carries a random nonce, so it is only byte-stable when produced once with a
 fixed key). It signs/encrypts nothing real.
@@ -178,7 +178,7 @@ fixed key). It signs/encrypts nothing real.
   participant. → **Production:** real live consultations and/or a clinician
   queue, with the record still produced for the audit trail.
 - 🩹 **Self-signed demo key, shipped with the app**, used for both JWS and JWE,
-  and `frontend/fixtures/demo-signing-key.jwk` is committed. → **Production:** AWS KMS /
+  and `frontend/fixtures/demo-insecure-do-not-use.jwk` is committed. → **Production:** AWS KMS /
   ACM PCA, key rotation, HSM-backed signing, a separate JWE key with least
   privilege, and never shipping keys with the app.
 - 🩹 **Records are discovered by scanning** the bucket's run-key prefixes (or

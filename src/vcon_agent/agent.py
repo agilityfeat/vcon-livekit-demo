@@ -23,6 +23,7 @@ credentials and is out of scope for automated verification.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone
@@ -392,8 +393,16 @@ async def entrypoint(ctx: JobContext) -> None:
     # with the local-file fallback when the AWS backend env is absent and a
     # guarded StartExecution when STATE_MACHINE_ARN is set.
     async def _flush_vcon() -> None:
+        # persist_vcon does synchronous, blocking work (boto3 client build, the
+        # S3 PutObject, and the guarded Step Functions StartExecution). Running
+        # it directly here would block the agent's event loop and delay audio /
+        # turn handling, so the whole blocking call (including the
+        # builder.to_dict() snapshot) runs in a worker thread via
+        # asyncio.to_thread and is awaited. The session has ended by shutdown, so
+        # snapshotting the vCon at call time in the worker thread is safe.
         try:
-            result = persist_vcon(
+            result = await asyncio.to_thread(
+                persist_vcon,
                 builder.to_dict(),
                 room_name,
                 session_start_iso,
