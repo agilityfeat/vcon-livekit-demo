@@ -33,6 +33,13 @@ MEDICATION_CATEGORY = "MEDICATION"
 MEDICAL_CONDITION_CATEGORY = "MEDICAL_CONDITION"
 _KEPT_CATEGORIES = frozenset({MEDICATION_CATEGORY, MEDICAL_CONDITION_CATEGORY})
 
+# The two fixed vCon party indices, defined in src/vcon_agent/vcon.py as
+# AGENT_INDEX = 1 / PATIENT_INDEX = 0. enrichment.py is a dependency-light pure
+# module with NO vcon import, so we re-declare the constants here (kept in sync
+# with vcon.py by convention) rather than importing them.
+AGENT_INDEX = 1
+PATIENT_INDEX = 0
+
 
 def map_turns_by_timestamp_overlap(
     medical_segments: Sequence[Dict[str, Any]],
@@ -268,57 +275,74 @@ def reconcile_segments_to_parties(
     medical_segments: Sequence[Dict[str, Any]],
     dialog_turns: Sequence[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Reconcile Transcribe speaker segments to the fixed party indices.
+    """Reconcile Transcribe speaker segments to the fixed party indices BY ORDER.
 
     Takes the speaker SEGMENTS produced by
     :func:`segments_from_transcribe_result` (each ``{'speaker', 'start', 'end',
-    'text'}``) and the vCon ``dialog`` turns, and returns one structured TURN per
-    segment, shaped ``{'party': <int|None>, 'speaker': 'spk_0'|..., 'start':
-    <float|None>, 'end': <float|None>, 'text': <str>}``.
+    'text'}``) and returns one structured TURN per segment, shaped
+    ``{'party': <int|None>, 'speaker': 'spk_0'|..., 'start': <float|None>,
+    'end': <float|None>, 'text': <str>}``, preserving speaker/start/end/text
+    EXACTLY. Only HOW each segment's ``party`` is assigned changes here.
 
-    Algorithm:
-      1. :func:`map_turns_by_timestamp_overlap` gives, per segment, the dialog
-         turn indices it overlaps in time.
-      2. For every overlapped turn, read its party (``dialog_turns[idx]['party']``).
-      3. Build a CONSISTENT ``spk_N -> party`` mapping by majority vote: for each
-         speaker label, tally the parties of all turns that any of its segments
-         overlap, and map the label to the majority party. A tie or no votes maps
-         to ``None`` so one speaker label never gets two different parties.
-      4. Emit one turn per segment carrying its label's reconciled party.
+    WHY ORDER AND NOT TIME OVERLAP: the medical-transcript segment times are
+    seconds-from-RECORDING-start (they begin at 0.0), while the live dialog-turn
+    ``start`` values are seconds-from-SESSION-connect (relative to
+    ``session_start_iso``). The two clocks have DIFFERENT ORIGINS, so overlapping
+    segment times against dialog-turn times resolved confidently WRONG (it
+    collapsed every speaker onto party 0, rendering every authoritative-transcript
+    turn as 'Patient'). Instead we trust Transcribe's own (clean) diarization and
+    map its ``spk_N`` labels to roles by SPEAKING ORDER, using the scripted
+    'agent speaks first' invariant: the scripted intake bot (agent) opens the call
+    with the consent script, so the speaker label whose FIRST segment starts
+    earliest is the AGENT.
 
-    CRITICAL FALLBACK: :func:`map_turns_by_timestamp_overlap` only aligns turns
-    whose ``start`` is a usable NUMBER; an ISO-string start coerces to ``None``
-    (via :func:`_as_float`) and that turn is skipped. So when NO dialog turn has a
-    numeric start (the live Deepgram turns record ISO wall-clock starts, not
-    per-turn second offsets), every segment overlaps nothing, every party resolves
-    to ``None``, and each turn keeps ONLY its ``spk_N`` speaker label. We do NOT
-    guess patient vs. agent in that case.
+    Algorithm (``dialog_turns`` is intentionally NOT read; see below):
+      1. For each distinct speaker label, find the START (``seg['start']``,
+         coerced via :func:`_as_float`) of that label's FIRST (earliest-start)
+         segment. A label whose first start is ``None``/unorderable has no
+         determinable position in the order.
+      2. Order the distinct labels by that first-segment start ascending.
+      3. Exactly 1 distinct label -> map it to ``None`` (diarization collapsed to
+         a single speaker; do NOT guess agent vs. patient -- the viewer shows a
+         generic 'Speaker N').
+      4. Exactly 2 distinct labels with distinct first-starts -> earliest is the
+         AGENT (:data:`AGENT_INDEX` = 1), the other is the PATIENT
+         (:data:`PATIENT_INDEX` = 0).
+      5. More than 2 distinct labels -> map the single earliest label to AGENT (1)
+         and ALL other distinct labels to PATIENT (0). This is a reasonable choice
+         for a scripted two-party intake where only the agent should open; it is
+         documented here rather than guessing a richer mapping.
+      6. A tie on the earliest first-start (two labels share the same earliest
+         instant), or any label whose first start is ``None``/unorderable, maps to
+         ``None`` rather than guessing.
 
-    This is design option (b): fall back to Transcribe's own ``spk_N`` labels
-    rather than mis-assigning patient/agent from unalignable data. The proper fix
-    (option that makes reconciliation resolve) is having the agent record NUMERIC
-    per-turn offsets for the live dialog so time overlap can run; that is OUT OF
-    SCOPE here and is flagged for production.
+    ``dialog_turns`` is accepted for signature compatibility (the caller, the
+    inline Merge mirror, and the tests all pass it) but is intentionally IGNORED
+    by this order-based mapping -- party is derived purely from the Transcribe
+    segment order. :data:`AGENT_INDEX` (1) / :data:`PATIENT_INDEX` (0) come from
+    src/vcon_agent/vcon.py.
+
+    🩹 Shortcut: role attribution rides the scripted 'agent speaks first'
+    invariant. → Production: channel separation (agent and patient on separate
+    audio channels) or robust diarization + speaker identity, rather than
+    inferring role from speaking order.
 
     Pure, deterministic, dependency-free.
     """
-    overlaps = map_turns_by_timestamp_overlap(medical_segments, dialog_turns)
-
-    # Tally, per speaker label, the parties of every overlapped dialog turn.
-    votes: Dict[str, Dict[Any, int]] = {}
-    for seg, covered in zip(medical_segments, overlaps):
+    # First-segment start per distinct label, preserving first-seen label order
+    # as a stable tiebreaker-free record (we detect ties explicitly below).
+    first_start: Dict[str, Optional[float]] = {}
+    for seg in medical_segments:
         speaker = seg.get("speaker", "spk_0")
-        tally = votes.setdefault(speaker, {})
-        for idx in covered:
-            party = dialog_turns[idx].get("party")
-            if party is None:
-                continue
-            tally[party] = tally.get(party, 0) + 1
+        start = _as_float(seg.get("start"))
+        if speaker not in first_start:
+            first_start[speaker] = start
+        else:
+            existing = first_start[speaker]
+            if start is not None and (existing is None or start < existing):
+                first_start[speaker] = start
 
-    # Resolve each speaker label to a single majority party (ties / none -> None).
-    label_to_party: Dict[str, Optional[int]] = {}
-    for speaker, tally in votes.items():
-        label_to_party[speaker] = _majority_party(tally)
+    label_to_party = _order_labels_to_parties(first_start)
 
     turns: List[Dict[str, Any]] = []
     for seg in medical_segments:
@@ -335,23 +359,47 @@ def reconcile_segments_to_parties(
     return turns
 
 
-def _majority_party(tally: Dict[Any, int]) -> Optional[int]:
-    """Return the single party with the strict majority of votes, else ``None``.
+def _order_labels_to_parties(
+    first_start: Dict[str, Optional[float]],
+) -> Dict[str, Optional[int]]:
+    """Map distinct speaker labels to party indices by first-segment start.
 
-    An empty tally (no overlapped turns, or none carried a party) yields
-    ``None``. A tie between two parties also yields ``None`` so one speaker label
-    is never force-mapped to an arbitrary party.
+    Earliest orderable label -> AGENT_INDEX (1); with exactly two labels the
+    other -> PATIENT_INDEX (0); with more than two, every non-earliest label ->
+    PATIENT_INDEX (0). A single label, a label with no usable numeric start, or a
+    tie on the earliest instant -> None (we do not guess).
     """
-    if not tally:
-        return None
-    ordered = sorted(tally.items(), key=lambda kv: kv[1], reverse=True)
-    if len(ordered) >= 2 and ordered[0][1] == ordered[1][1]:
-        return None
-    winner = ordered[0][0]
-    try:
-        return int(winner)
-    except (TypeError, ValueError):
-        return winner
+    label_to_party: Dict[str, Optional[int]] = {label: None for label in first_start}
+
+    # A single distinct label cannot establish an order -> leave it None.
+    if len(first_start) < 2:
+        return label_to_party
+
+    orderable = {
+        label: start for label, start in first_start.items() if start is not None
+    }
+    if not orderable:
+        return label_to_party
+
+    earliest_start = min(orderable.values())
+    earliest_labels = [
+        label for label, start in orderable.items() if start == earliest_start
+    ]
+    # A tie on the earliest first-start is unorderable -> do not guess.
+    if len(earliest_labels) != 1:
+        return label_to_party
+
+    agent_label = earliest_labels[0]
+    for label in first_start:
+        if label == agent_label:
+            label_to_party[label] = AGENT_INDEX
+        elif first_start[label] is not None:
+            # The other orderable label(s) are the patient. For >2 labels this
+            # collapses every non-earliest label onto PATIENT_INDEX (documented
+            # choice for a scripted two-party intake).
+            label_to_party[label] = PATIENT_INDEX
+        # Labels with no usable numeric start stay None (unorderable).
+    return label_to_party
 
 
 def extract_min_entities(comprehend_response: Dict[str, Any]) -> List[Dict[str, Any]]:

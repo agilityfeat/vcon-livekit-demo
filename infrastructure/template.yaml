@@ -1125,87 +1125,74 @@ Resources:
               return None
 
 
-          def _map_turns_by_timestamp_overlap(medical_segments, dialog_turns):
-              # Mirror of enrichment.map_turns_by_timestamp_overlap: per segment,
-              # the dialog-turn indices whose [start,end) interval overlaps the
-              # segment's. Turns without a numeric start are skipped.
-              starts = []
-              for turn in dialog_turns:
-                  starts.append(_as_float(turn.get("start")))
-              intervals = []
-              for idx, turn in enumerate(dialog_turns):
-                  start = starts[idx]
-                  if start is None:
-                      intervals.append(None)
-                      continue
-                  end = _as_float(turn.get("end"))
-                  if end is None:
-                      end = float("inf")
-                      for later in starts[idx + 1:]:
-                          if later is not None and later > start:
-                              end = later
-                              break
-                  intervals.append((start, end))
-
-              mapped = []
-              for seg in medical_segments:
-                  seg_start = _as_float(seg.get("start"))
-                  seg_end = _as_float(seg.get("end"))
-                  if seg_start is None:
-                      mapped.append([])
-                      continue
-                  if seg_end is None:
-                      seg_end = seg_start
-                  covered = []
-                  for idx, interval in enumerate(intervals):
-                      if interval is None:
-                          continue
-                      t_start, t_end = interval
-                      if seg_start == seg_end:
-                          if t_start <= seg_start < t_end:
-                              covered.append(idx)
-                      elif seg_start < t_end and t_start < seg_end:
-                          covered.append(idx)
-                  mapped.append(covered)
-              return mapped
+          # The two fixed vCon party indices (from vcon.py): AGENT_INDEX = 1 /
+          # PATIENT_INDEX = 0. Re-declared inline (no imports available here).
+          AGENT_INDEX = 1
+          PATIENT_INDEX = 0
 
 
-          def _majority_party(tally):
-              # Mirror of enrichment._majority_party: strict-majority party, else
-              # None (empty tally or a tie -> None).
-              if not tally:
-                  return None
-              ordered = sorted(tally.items(), key=lambda kv: kv[1], reverse=True)
-              if len(ordered) >= 2 and ordered[0][1] == ordered[1][1]:
-                  return None
-              winner = ordered[0][0]
-              try:
-                  return int(winner)
-              except (TypeError, ValueError):
-                  return winner
+          def _order_labels_to_parties(first_start):
+              # Mirror of enrichment._order_labels_to_parties: earliest orderable
+              # label -> AGENT_INDEX (1); with exactly two labels the other ->
+              # PATIENT_INDEX (0); with more than two, every non-earliest label ->
+              # PATIENT_INDEX (0). A single label, an unorderable (None) start, or
+              # a tie on the earliest instant -> None (we do not guess).
+              label_to_party = {label: None for label in first_start}
+              if len(first_start) < 2:
+                  return label_to_party
+              orderable = {
+                  label: start
+                  for label, start in first_start.items()
+                  if start is not None
+              }
+              if not orderable:
+                  return label_to_party
+              earliest_start = min(orderable.values())
+              earliest_labels = [
+                  label
+                  for label, start in orderable.items()
+                  if start == earliest_start
+              ]
+              if len(earliest_labels) != 1:
+                  return label_to_party
+              agent_label = earliest_labels[0]
+              for label in first_start:
+                  if label == agent_label:
+                      label_to_party[label] = AGENT_INDEX
+                  elif first_start[label] is not None:
+                      label_to_party[label] = PATIENT_INDEX
+              return label_to_party
 
 
           def _reconcile_segments_to_parties(medical_segments, dialog_turns):
               # Mirror of enrichment.reconcile_segments_to_parties: one structured
-              # turn per segment ({'party','speaker','start','end','text'}) with a
-              # consistent spk_N -> party majority mapping. When no dialog turn has
-              # a numeric start every party resolves to None and only the spk
-              # labels survive (documented fallback; we do NOT guess).
-              overlaps = _map_turns_by_timestamp_overlap(
-                  medical_segments, dialog_turns
-              )
-              votes = {}
-              for seg, covered in zip(medical_segments, overlaps):
+              # turn per segment ({'party','speaker','start','end','text'}),
+              # preserving speaker/start/end/text exactly. Party is assigned BY
+              # SPEAKING ORDER, NOT by time overlap: the medical-segment clock
+              # (seconds from recording start) and the live dialog-turn clock
+              # (seconds from session connect) have DIFFERENT origins, so overlap
+              # resolved wrong. Instead we trust Transcribe's diarization and the
+              # scripted 'agent speaks first' invariant: the label whose FIRST
+              # segment starts earliest is the AGENT (1), the other is the PATIENT
+              # (0). One distinct label / ties / unorderable -> None (no guess).
+              # dialog_turns is accepted for signature compatibility and is
+              # intentionally IGNORED by the order-based mapping.
+              # 🩹 Shortcut: relies on the scripted 'agent speaks first'
+              # invariant. -> Production: channel separation or robust
+              # diarization + identity rather than speaking order.
+              first_start = {}
+              for seg in medical_segments:
                   speaker = seg.get("speaker", "spk_0")
-                  tally = votes.setdefault(speaker, {})
-                  for idx in covered:
-                      party = dialog_turns[idx].get("party")
-                      if party is None:
-                          continue
-                      tally[party] = tally.get(party, 0) + 1
-              label_to_party = {}
-              for speaker, tally in votes.items():
-                  label_to_party[speaker] = _majority_party(tally)
+                  start = _as_float(seg.get("start"))
+                  if speaker not in first_start:
+                      first_start[speaker] = start
+                  else:
+                      existing = first_start[speaker]
+                      if start is not None and (
+                          existing is None or start < existing
+                      ):
+                          first_start[speaker] = start
+              label_to_party = _order_labels_to_parties(first_start)
               turns = []
               for seg in medical_segments:
                   speaker = seg.get("speaker", "spk_0")
@@ -1248,8 +1235,8 @@ Resources:
               # Structured speaker segments thread through from GetTranscription
               # via whichever Analyze branch re-emitted them. When present, build
               # speaker-attributed turns by reconciling them to the party indices
-              # over the live dialog turns; party resolves to None (spk label
-              # only) when the live turns have no numeric starts to align against.
+              # BY SPEAKING ORDER (agent speaks first); party resolves to None
+              # (spk label only) for a single speaker / ties / unorderable starts.
               transcript_segments = (
                   comprehend.get("transcript_segments")
                   or bedrock.get("transcript_segments")

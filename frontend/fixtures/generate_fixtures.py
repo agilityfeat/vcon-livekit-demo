@@ -153,10 +153,11 @@ def build_enriched_vcon() -> dict:
     # deployed pipeline runs: build a Transcribe-Medical-shaped result (speaker
     # labels + timestamped word items aligned to the fixture's dialog windows),
     # parse it with enrichment.segments_from_transcribe_result, then reconcile the
-    # spk_N labels to party indices against the fixture's NUMERIC-timed dialog via
-    # enrichment.reconcile_segments_to_parties. Because the fixture dialog has
-    # numeric starts, reconciliation resolves spk_0 -> agent (party 1) and spk_1
-    # -> patient (party 0), so the record view shows party-labeled turns.
+    # spk_N labels to party indices via enrichment.reconcile_segments_to_parties.
+    # Reconciliation is ORDER-BASED (option 2a): the label whose first segment
+    # starts earliest is the agent (the scripted bot opens the call). In the
+    # canned result spk_0 speaks first, so spk_0 -> agent (party 1) and spk_1 ->
+    # patient (party 0), and the record view shows party-labeled turns.
     transcribe_result = _build_transcribe_medical_result()
     medical_segments = enrichment.segments_from_transcribe_result(transcribe_result)
     structured_turns = enrichment.reconcile_segments_to_parties(
@@ -215,11 +216,11 @@ def _build_transcribe_medical_result() -> dict:
     speaker labels enabled: ``results.transcripts`` (flat text),
     ``results.items`` (timestamped word items, punctuation without timestamps),
     and ``results.speaker_labels.segments`` (one per clinical turn, with a
-    ``speaker_label`` + [start_time, end_time] window). The segment windows are
-    aligned to the fixture dialog's numeric turn windows so that
+    ``speaker_label`` + [start_time, end_time] window). spk_0 speaks first (its
+    first segment starts at 0.0), so the ORDER-BASED
     enrichment.reconcile_segments_to_parties resolves spk_0 -> agent and spk_1 ->
-    patient by timestamp overlap. This is the SAME parse path the deployed
-    pipeline runs, so the fixture's structured turns mirror real output.
+    patient. This is the SAME parse path the deployed pipeline runs, so the
+    fixture's structured turns mirror real output.
 
     Speaker assignment by dialog window:
       * dialog[0] agent   0.0 - 4.0   -> spk_0

@@ -140,9 +140,10 @@ def test_add_dialog_turn_by_role():
 
 # ----------------------------------------------------------------------------
 # Numeric per-turn offset: a dialog turn created with a numeric start_offset
-# gets a NUMERIC ``start`` (seconds from call start) so the authoritative-
-# transcript speaker->party reconciliation can time-overlap against it. The ISO
-# wall-clock moves to ``start_iso``. Default (no offset) is unchanged.
+# gets a NUMERIC ``start`` (seconds from call start) and the ISO wall-clock
+# moves to ``start_iso``. Default (no offset) is unchanged. (The authoritative-
+# transcript speaker->party reconciliation no longer consumes these starts -- it
+# maps by Transcribe speaker order -- but the numeric offset remains recorded.)
 # ----------------------------------------------------------------------------
 
 
@@ -199,39 +200,40 @@ def test_add_dialog_turn_by_role_threads_numeric_offset():
     assert entry["start_iso"]
 
 
-def test_reconciliation_resolves_parties_for_numeric_start_turns():
-    # The whole point: with NUMERIC per-turn starts, the speaker->party
-    # reconciliation time-overlaps Transcribe segments against the live dialog
-    # turns and resolves spk_N to Patient/Agent instead of leaving party=None.
+def test_reconciliation_resolves_parties_by_speaking_order():
+    # Order-based mapping (option 2a): the speaker label whose FIRST Transcribe
+    # segment starts earliest is the AGENT (agent opens the scripted intake), the
+    # other distinct label is the PATIENT. spk_0 speaks first here.
     from vcon_agent.enrichment import reconcile_segments_to_parties
 
     builder = VConBuilder()
     builder.add_consent(granted=True)
-    # Agent speaks first at t=0, patient answers at t=4 (numeric offsets).
     builder.add_dialog_turn(AGENT_INDEX, "What brings you in today?", start_offset=0.0)
     builder.add_dialog_turn(PATIENT_INDEX, "I've had a headache.", start_offset=4.0)
     dialog_turns = builder.to_dict()["dialog"]
 
-    # Transcribe Medical segments (numeric seconds) overlapping each turn.
+    # Transcribe Medical segments (seconds from recording start, begin at 0.0).
     segments = [
         {"speaker": "spk_0", "start": 0.0, "end": 3.0, "text": "What brings you in today?"},
         {"speaker": "spk_1", "start": 4.0, "end": 6.0, "text": "I've had a headache."},
     ]
     turns = reconcile_segments_to_parties(segments, dialog_turns)
     by_speaker = {t["speaker"]: t["party"] for t in turns}
-    # spk_0 overlaps the agent turn -> party 1; spk_1 overlaps patient -> party 0.
+    # spk_0 speaks first -> agent; spk_1 later -> patient.
     assert by_speaker["spk_0"] == AGENT_INDEX
     assert by_speaker["spk_1"] == PATIENT_INDEX
 
 
-def test_reconciliation_falls_back_to_none_for_iso_start_turns():
-    # Back-compat guard: with the ISO-string default start (no numeric offset),
-    # reconciliation cannot align by time and leaves party=None (the documented
-    # fallback), confirming the numeric offset is what enables resolution.
+def test_reconciliation_ignores_dialog_starts():
+    # The mapping no longer depends on dialog-turn starts at all: with the
+    # ISO-string default starts (the real Deepgram shape, DIFFERENT clock origin
+    # from the Transcribe segments) the result is UNCHANGED -- order-based
+    # resolution still yields agent/patient by Transcribe segment order.
     from vcon_agent.enrichment import reconcile_segments_to_parties
 
     builder = VConBuilder()
     builder.add_consent(granted=True)
+    # No start_offset -> ISO-string default starts.
     builder.add_dialog_turn(AGENT_INDEX, "What brings you in today?")
     builder.add_dialog_turn(PATIENT_INDEX, "I've had a headache.")
     dialog_turns = builder.to_dict()["dialog"]
@@ -241,7 +243,9 @@ def test_reconciliation_falls_back_to_none_for_iso_start_turns():
         {"speaker": "spk_1", "start": 4.0, "end": 6.0, "text": "I've had a headache."},
     ]
     turns = reconcile_segments_to_parties(segments, dialog_turns)
-    assert all(t["party"] is None for t in turns)
+    by_speaker = {t["speaker"]: t["party"] for t in turns}
+    assert by_speaker["spk_0"] == AGENT_INDEX
+    assert by_speaker["spk_1"] == PATIENT_INDEX
 
 
 def test_run_key_layout_exact():

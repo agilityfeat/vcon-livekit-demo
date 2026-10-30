@@ -245,14 +245,16 @@ def test_merge_reconcile_matches_pure_core_on_numeric_dialog():
     mirror = ns["_reconcile_segments_to_parties"](segments, dialog)
     pure = enrichment.reconcile_segments_to_parties(segments, dialog)
     assert mirror == pure
-    # And it actually resolved the parties by time overlap.
-    assert [t["party"] for t in mirror] == [0, 1]
+    # Order-based: spk_0 speaks first (0.0) -> agent (1); spk_1 later -> patient.
+    assert [t["party"] for t in mirror] == [1, 0]
     assert [t["speaker"] for t in mirror] == ["spk_0", "spk_1"]
 
 
 def test_merge_reconcile_matches_pure_core_on_iso_dialog():
-    """ISO-string dialog starts coerce to None, so every party falls back to None
-    and only spk labels survive. The mirror must match the pure core here too."""
+    """Reconciliation now ignores dialog starts entirely (party is assigned by
+    Transcribe segment ORDER), so ISO-string dialog starts make no difference:
+    the mirror still matches the pure core AND still resolves spk_0 -> agent (1),
+    spk_1 -> patient (0) exactly as with numeric dialog starts."""
     from vcon_agent import enrichment
 
     ns = _merge_namespace()
@@ -262,14 +264,15 @@ def test_merge_reconcile_matches_pure_core_on_iso_dialog():
     mirror = ns["_reconcile_segments_to_parties"](segments, dialog)
     pure = enrichment.reconcile_segments_to_parties(segments, dialog)
     assert mirror == pure
-    assert [t["party"] for t in mirror] == [None, None]
+    # Same order-based result as the numeric-dialog case: dialog starts ignored.
+    assert [t["party"] for t in mirror] == [1, 0]
     assert [t["speaker"] for t in mirror] == ["spk_0", "spk_1"]
 
 
 def test_merge_stores_turns_reconciled_to_parties_with_numeric_dialog():
-    """With numeric dialog starts, Merge stores `turns` on the authoritative
-    transcript entry reconciled to the fixed party indices, while preserving the
-    flat body and the deterministic analysis order."""
+    """Merge stores `turns` on the authoritative transcript entry reconciled to
+    the fixed party indices by SPEAKING ORDER (spk_0 speaks first -> agent),
+    while preserving the flat body and the deterministic analysis order."""
     from vcon_agent import enrichment
 
     ns = _merge_namespace()
@@ -284,7 +287,8 @@ def test_merge_stores_turns_reconciled_to_parties_with_numeric_dialog():
     assert entry["vendor"] == "aws-transcribe-medical"
     assert entry["mimetype"] == "text/plain"
     assert "turns" in entry
-    assert [t["party"] for t in entry["turns"]] == [0, 1]
+    # Order-based: spk_0 speaks first -> agent (1); spk_1 -> patient (0).
+    assert [t["party"] for t in entry["turns"]] == [1, 0]
     assert [t["speaker"] for t in entry["turns"]] == ["spk_0", "spk_1"]
     assert entry["turns"][0]["text"] == "I have a headache"
     assert entry["turns"][1]["text"] == "for three days."
@@ -298,22 +302,31 @@ def test_merge_stores_turns_reconciled_to_parties_with_numeric_dialog():
     assert merged["step"] == "merge"
 
 
-def test_merge_turns_party_none_when_dialog_starts_are_iso():
-    """With ISO-string dialog starts, Merge still stores `turns` but every party
-    is None and the spk labels survive (the documented graceful fallback)."""
+def test_merge_turns_party_none_for_single_speaker():
+    """When Transcribe diarization collapses to ONE distinct speaker label, the
+    order-based mapping cannot establish an agent/patient order, so Merge stores
+    `turns` with every party None and only the spk label surviving (the
+    documented graceful 'Speaker N' fallback -- we do NOT guess). The mirror must
+    match the pure core here too."""
     from vcon_agent import enrichment
 
     ns = _merge_namespace()
     handler = ns["handler"]
-    segments = enrichment.segments_from_transcribe_result(_canned_result())
+    # A single-speaker segment list (all spk_0): diarization collapsed.
+    segments = [
+        {"speaker": "spk_0", "start": 0.0, "end": 1.0, "text": "I have a headache"},
+        {"speaker": "spk_0", "start": 1.2, "end": 2.0, "text": "for three days."},
+    ]
+    pure = enrichment.reconcile_segments_to_parties(segments, _numeric_dialog())
+    mirror = ns["_reconcile_segments_to_parties"](segments, _numeric_dialog())
+    assert mirror == pure
 
-    merged = handler(_branches(segments, _iso_dialog()), None)
+    merged = handler(_branches(segments, _numeric_dialog()), None)
 
     entry = _transcript_entry(merged)
-    assert entry["body"] == "I have a headache for three days."
     assert "turns" in entry
     assert [t["party"] for t in entry["turns"]] == [None, None]
-    assert [t["speaker"] for t in entry["turns"]] == ["spk_0", "spk_1"]
+    assert [t["speaker"] for t in entry["turns"]] == ["spk_0", "spk_0"]
 
 
 def test_merge_omits_turns_for_segmentless_envelope():

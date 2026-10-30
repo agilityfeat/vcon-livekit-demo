@@ -370,80 +370,97 @@ def test_segments_empty_input_yields_single_empty_segment():
 # ----------------------------------------------------------------------------
 
 
-def test_reconcile_assigns_parties_by_time_overlap():
-    # Dialog turns with NUMERIC starts spanning two parties:
-    #   turn 0 patient [0,10), turn 1 agent [10,20), turn 2 patient [20,inf).
-    dialog = [
-        {"type": "text", "party": 0, "start": 0},
-        {"type": "text", "party": 1, "start": 10},
-        {"type": "text", "party": 0, "start": 20},
-    ]
+# Order-based mapping (option 2a): the speaker label whose FIRST segment starts
+# earliest is the AGENT (party 1), the other distinct label is the PATIENT
+# (party 0). dialog_turns is accepted but intentionally IGNORED (party is derived
+# from Transcribe segment order, not from cross-clock time overlap). A dummy
+# dialog is passed to exercise that it has no effect on the outcome.
+_DUMMY_DIALOG = [
+    {"type": "text", "party": 0, "start": "2024-01-01T00:00:00+00:00"},
+    {"type": "text", "party": 1, "start": "2024-01-01T00:00:05+00:00"},
+]
+
+
+def test_reconcile_assigns_parties_by_speaking_order():
+    # spk_0 speaks first (earliest start) -> agent (1); spk_1 later -> patient (0).
+    # The spk_N label and text/timing are preserved EXACTLY on each turn.
     segments = [
-        {"speaker": "spk_0", "start": 1, "end": 5, "text": "I have a headache."},
-        {"speaker": "spk_1", "start": 11, "end": 15, "text": "How long?"},
-        {"speaker": "spk_0", "start": 21, "end": 25, "text": "Two days."},
+        {"speaker": "spk_0", "start": 0.0, "end": 4.0, "text": "What brings you in?"},
+        {"speaker": "spk_1", "start": 4.0, "end": 6.0, "text": "I have a headache."},
+        {"speaker": "spk_0", "start": 7.5, "end": 9.0, "text": "How long?"},
     ]
-    turns = reconcile_segments_to_parties(segments, dialog)
-    assert [t["party"] for t in turns] == [0, 1, 0]
-    # The spk_N label and text/timing are preserved on each turn.
+    turns = reconcile_segments_to_parties(segments, _DUMMY_DIALOG)
+    assert [t["party"] for t in turns] == [1, 0, 1]
     assert [t["speaker"] for t in turns] == ["spk_0", "spk_1", "spk_0"]
-    assert turns[0]["text"] == "I have a headache."
-    assert turns[0]["start"] == 1 and turns[0]["end"] == 5
+    assert turns[1]["text"] == "I have a headache."
+    assert turns[0]["start"] == 0.0 and turns[0]["end"] == 4.0
 
 
-def test_reconcile_majority_resolves_mixed_overlap():
-    # One speaker label overlaps turns of mixed parties; majority wins. spk_0
-    # overlaps two patient turns and one agent turn -> patient (0).
-    dialog = [
-        {"type": "text", "party": 0, "start": 0, "end": 5},
-        {"type": "text", "party": 0, "start": 5, "end": 10},
-        {"type": "text", "party": 1, "start": 10, "end": 15},
-    ]
-    # A single spk_0 segment straddling all three turns.
-    segments = [{"speaker": "spk_0", "start": 1, "end": 14, "text": "..."}]
-    turns = reconcile_segments_to_parties(segments, dialog)
-    assert turns[0]["party"] == 0
-
-
-def test_reconcile_consistent_label_to_party_mapping():
-    # Two spk_0 segments must resolve to the SAME party (consistent mapping),
-    # even if one of them overlaps nothing on its own.
-    dialog = [
-        {"type": "text", "party": 1, "start": 0, "end": 10},
-    ]
+def test_reconcile_maps_by_order_not_label_name():
+    # ORDER, NOT LABEL NAME: here spk_1 has the EARLIEST start and spk_0 comes
+    # later, so spk_1 must resolve to agent (1) and spk_0 to patient (0). This
+    # proves the mapping keys off speaking order, not the numeric label suffix.
     segments = [
-        {"speaker": "spk_0", "start": 1, "end": 5, "text": "a"},
-        {"speaker": "spk_0", "start": 100, "end": 105, "text": "b"},
+        {"speaker": "spk_1", "start": 0.0, "end": 3.0, "text": "What brings you in?"},
+        {"speaker": "spk_0", "start": 3.0, "end": 6.0, "text": "I have a headache."},
     ]
-    turns = reconcile_segments_to_parties(segments, dialog)
-    # Both spk_0 turns map to the same (agent) party from the pooled vote.
-    assert [t["party"] for t in turns] == [1, 1]
+    turns = reconcile_segments_to_parties(segments, _DUMMY_DIALOG)
+    by_speaker = {t["speaker"]: t["party"] for t in turns}
+    assert by_speaker["spk_1"] == 1  # earliest -> agent
+    assert by_speaker["spk_0"] == 0  # later -> patient
 
 
-def test_reconcile_iso_string_starts_fall_back_to_speaker_labels():
-    # The documented CRITICAL fallback: when NO dialog turn has a numeric start
-    # (live turns carry ISO wall-clock starts), nothing can be time-aligned, so
-    # every turn's party is None and only the spk_N label survives. We must NOT
-    # guess patient/agent.
-    dialog = [
-        {"type": "text", "party": 0, "start": "2024-01-01T00:00:00+00:00"},
-        {"type": "text", "party": 1, "start": "2024-01-01T00:00:05+00:00"},
-    ]
+def test_reconcile_single_speaker_yields_party_none():
+    # Diarization collapsed to ONE distinct label: no order can be established,
+    # so every turn's party is None and the spk label survives (generic
+    # 'Speaker N' fallback). We do NOT guess agent vs. patient.
     segments = [
-        {"speaker": "spk_0", "start": 1, "end": 5, "text": "I have a headache."},
-        {"speaker": "spk_1", "start": 6, "end": 9, "text": "How long?"},
+        {"speaker": "spk_0", "start": 0.0, "end": 3.0, "text": "a"},
+        {"speaker": "spk_0", "start": 3.0, "end": 6.0, "text": "b"},
     ]
-    turns = reconcile_segments_to_parties(segments, dialog)
+    turns = reconcile_segments_to_parties(segments, _DUMMY_DIALOG)
     assert [t["party"] for t in turns] == [None, None]
-    # Speaker labels are preserved as the fallback attribution.
+    assert [t["speaker"] for t in turns] == ["spk_0", "spk_0"]
+
+
+def test_reconcile_more_than_two_labels_earliest_agent_rest_patient():
+    # Documented behavior for >2 distinct labels in a two-party intake: the single
+    # earliest label -> agent (1), ALL other distinct labels -> patient (0).
+    segments = [
+        {"speaker": "spk_1", "start": 0.0, "end": 2.0, "text": "a"},  # earliest
+        {"speaker": "spk_0", "start": 2.0, "end": 4.0, "text": "b"},
+        {"speaker": "spk_2", "start": 4.0, "end": 6.0, "text": "c"},
+    ]
+    turns = reconcile_segments_to_parties(segments, _DUMMY_DIALOG)
+    by_speaker = {t["speaker"]: t["party"] for t in turns}
+    assert by_speaker["spk_1"] == 1
+    assert by_speaker["spk_0"] == 0
+    assert by_speaker["spk_2"] == 0
+
+
+def test_reconcile_tie_on_earliest_yields_party_none():
+    # Two labels share the SAME earliest first-start instant -> the order is
+    # ambiguous, so the tied labels map to None rather than guessing.
+    segments = [
+        {"speaker": "spk_0", "start": 0.0, "end": 2.0, "text": "a"},
+        {"speaker": "spk_1", "start": 0.0, "end": 2.0, "text": "b"},
+    ]
+    turns = reconcile_segments_to_parties(segments, _DUMMY_DIALOG)
+    assert [t["party"] for t in turns] == [None, None]
     assert [t["speaker"] for t in turns] == ["spk_0", "spk_1"]
-    assert turns[0]["text"] == "I have a headache."
 
 
-def test_reconcile_no_overlap_yields_party_none():
-    # Numeric starts exist but the segment overlaps none of them -> party None.
-    dialog = [{"type": "text", "party": 0, "start": 0, "end": 10}]
-    segments = [{"speaker": "spk_0", "start": 100, "end": 105, "text": "later"}]
-    turns = reconcile_segments_to_parties(segments, dialog)
-    assert turns[0]["party"] is None
-    assert turns[0]["speaker"] == "spk_0"
+def test_reconcile_unorderable_start_yields_party_none():
+    # A label whose first segment start is not a usable number (ISO string ->
+    # None via _as_float) is unorderable and maps to None; the other, orderable
+    # label still resolves (it is the only orderable label, so it is the earliest
+    # -> agent).
+    segments = [
+        {"speaker": "spk_0", "start": "2024-01-01T00:00:00+00:00", "end": None,
+         "text": "a"},
+        {"speaker": "spk_1", "start": 1.0, "end": 2.0, "text": "b"},
+    ]
+    turns = reconcile_segments_to_parties(segments, _DUMMY_DIALOG)
+    by_speaker = {t["speaker"]: t["party"] for t in turns}
+    assert by_speaker["spk_0"] is None  # unorderable
+    assert by_speaker["spk_1"] == 1  # only orderable label -> earliest -> agent
