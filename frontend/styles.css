@@ -306,6 +306,14 @@ audio { width: 100%; }
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* When the authoritative transcript is up-leveled into speaker turns it hosts a
+   <ol class="dialog clinical-turns">; reuse the live-transcript .dialog turn
+   styling and drop the flat-blob pre-wrap so the list lays out normally. */
+.clinical-transcript .clinical-turns {
+  white-space: normal;
+  word-break: normal;
+  margin: 0;
+}
 
 /* Live transcript (demoted): the real-time STT kept for reference, so it is
    visually subdued -- muted background and heading -- to read as secondary to

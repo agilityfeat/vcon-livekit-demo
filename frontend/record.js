@@ -367,14 +367,40 @@ function renderSummary(doc) {
 }
 
 /**
+ * Derive a GENERIC speaker label from a Transcribe `spk_N` label.
+ *
+ * Used only when a structured turn's `party` is null (reconciliation could not
+ * resolve patient/agent), so we must NOT guess clinical roles. Maps 'spk_0' ->
+ * 'Speaker 1', 'spk_1' -> 'Speaker 2', generally 'spk_N' -> 'Speaker '+(N+1),
+ * and falls back to the raw label (or 'Speaker') for anything unexpected.
+ */
+function genericSpeakerLabel(speaker) {
+  var m = /^spk_(\d+)$/.exec(String(speaker == null ? '' : speaker));
+  if (m) return 'Speaker ' + (parseInt(m[1], 10) + 1);
+  return speaker ? String(speaker) : 'Speaker';
+}
+
+/**
  * Render the AUTHORITATIVE clinical transcript (Transcribe Medical) as the
- * primary transcript the clinician reads. It is a single plain-text blob in the
- * analysis[] transcript entry -- no per-turn/speaker structure -- so we present
- * it as a formatted text block (escape first, preserve newlines, then highlight
- * [REDACTED] so a masked body still shows the pills in the analyst view). The
- * vendor/authoritative badges mark it as the clinical-grade source. If there is
- * no authoritative transcript entry we hide the panel and leave the live
- * transcript below as the only transcript.
+ * primary transcript the clinician reads.
+ *
+ * When the authoritative analysis[] entry carries a structured `turns` array
+ * (speaker-attributed, timestamped segments produced by the pipeline) we render
+ * it as speaker-attributed turns -- an <ol>/<li> list mirroring the live
+ * transcript (renderDialog) -- so the clinical transcript reads like turns
+ * rather than a wall of text. Each turn is labeled by its party
+ * (speakerLabelForPartyIndex) when `party` is a number, otherwise by a generic
+ * 'Speaker N' derived from the spk_N label; we NEVER guess patient/agent when
+ * party is null.
+ *
+ * When there are no structured turns (older records, the canned flat path, or
+ * unmapped output) we fall back to the flat-text `body` block (escape first,
+ * preserve newlines via CSS white-space: pre-wrap, then highlight [REDACTED]).
+ * The vendor/authoritative badges mark it as the clinical-grade source. The
+ * panel is hidden only when there is NEITHER a body NOR structured turns.
+ *
+ * XSS-safe throughout: untrusted text is escaped FIRST, then highlightRedactions
+ * wraps only the fixed escaped token before anything is assigned to innerHTML.
  */
 function renderClinicalTranscript(doc) {
   var panel = $('clinical-transcript-panel');
@@ -384,7 +410,9 @@ function renderClinicalTranscript(doc) {
   body.innerHTML = '';
 
   var entry = findAuthoritativeTranscript(doc);
-  if (!entry || entry.body == null || String(entry.body) === '') {
+  var turns = entry ? authoritativeTranscriptTurns(entry) : null;
+  var hasBody = !!entry && entry.body != null && String(entry.body) !== '';
+  if (!entry || (!hasBody && !turns)) {
     panel.hidden = true;
     return;
   }
@@ -403,10 +431,50 @@ function renderClinicalTranscript(doc) {
     badges.appendChild(auth);
   }
 
-  // The transcript is plain text, not markdown: escape it, keep its line breaks
+  if (turns) {
+    // Structured path: render speaker-attributed turns, reusing the live
+    // transcript's <ol>/<li> + .speaker + highlightRedactions(escapeHtml(...))
+    // pattern so the clinical transcript reads like turns.
+    body.className = 'clinical-transcript';
+    var ol = document.createElement('ol');
+    ol.className = 'dialog clinical-turns';
+    turns.forEach(function (turn) {
+      var li = document.createElement('li');
+      var label;
+      if (typeof turn.party === 'number') {
+        var role = ((doc.parties || [])[turn.party] || {}).role || '';
+        li.className = role === 'patient' ? 'patient' : (role === 'agent' ? 'agent' : '');
+        label = speakerLabelForPartyIndex(doc, turn.party);
+      } else {
+        // party unresolved: use the generic spk_N label, never a clinical role.
+        label = genericSpeakerLabel(turn.speaker);
+      }
+
+      var spk = document.createElement('span');
+      spk.className = 'speaker';
+      spk.textContent = label + ':';
+      li.appendChild(spk);
+
+      // Escape the turn text first, then highlight [REDACTED]. XSS-safe: only
+      // the fixed escaped token is wrapped; the rest stays escaped text.
+      var bodyText = document.createElement('span');
+      bodyText.className = 'turn-body';
+      bodyText.innerHTML = highlightRedactions(
+        escapeHtml(' ' + (turn.text == null ? '' : turn.text))
+      );
+      li.appendChild(bodyText);
+
+      ol.appendChild(li);
+    });
+    body.appendChild(ol);
+    return;
+  }
+
+  // Flat fallback: plain text, not markdown. Escape it, keep its line breaks
   // (CSS white-space: pre-wrap preserves them), then highlight [REDACTED] so a
   // masked transcript reads as masked in the analyst view. XSS-safe: only the
   // escaped fixed token is wrapped.
+  body.className = 'clinical-transcript body-text';
   body.innerHTML = highlightRedactions(escapeHtml(String(entry.body)));
 }
 

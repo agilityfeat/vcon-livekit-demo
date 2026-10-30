@@ -65,6 +65,7 @@ for _p in (_SEAL_PKG, _SRC):
         sys.path.insert(0, _p)
 
 import sealing  # noqa: E402  (import after the sys.path shim)
+from vcon_agent import enrichment  # noqa: E402
 from vcon_agent.vcon import VConBuilder  # noqa: E402
 
 FIXTURES_DIR = Path(__file__).resolve().parent
@@ -145,6 +146,23 @@ def build_enriched_vcon() -> dict:
     rec["duration"] = 23.0
 
     # Transcript analysis (authoritative), covering the four speech turns.
+    #
+    # Up-levelled: the authoritative transcript carries STRUCTURED speaker turns
+    # (like the live transcript) IN ADDITION TO the flat body. To mirror real
+    # pipeline output rather than hand-faking data, we run the SAME pure core the
+    # deployed pipeline runs: build a Transcribe-Medical-shaped result (speaker
+    # labels + timestamped word items aligned to the fixture's dialog windows),
+    # parse it with enrichment.segments_from_transcribe_result, then reconcile the
+    # spk_N labels to party indices against the fixture's NUMERIC-timed dialog via
+    # enrichment.reconcile_segments_to_parties. Because the fixture dialog has
+    # numeric starts, reconciliation resolves spk_0 -> agent (party 1) and spk_1
+    # -> patient (party 0), so the record view shows party-labeled turns.
+    transcribe_result = _build_transcribe_medical_result()
+    medical_segments = enrichment.segments_from_transcribe_result(transcribe_result)
+    structured_turns = enrichment.reconcile_segments_to_parties(
+        medical_segments, builder.to_dict()["dialog"]
+    )
+
     builder.add_transcript_analysis(
         transcript_text=(
             "Agent: What brings you in today? "
@@ -153,6 +171,7 @@ def build_enriched_vcon() -> dict:
             "Patient: I took some ibuprofen this morning but it didn't help much."
         ),
         dialog_indices=[0, 1, 2, 3],
+        turns=structured_turns,
     )
 
     # Entities analysis pinned to dialog turn 3 (the ibuprofen/headache turn),
@@ -176,6 +195,90 @@ def build_enriched_vcon() -> dict:
     )
 
     return builder.to_dict()
+
+
+def _build_transcribe_medical_result() -> dict:
+    """Build a canned Transcribe-Medical result (speaker labels + word items).
+
+    Shaped exactly like a real ``StartMedicalTranscriptionJob`` result JSON with
+    speaker labels enabled: ``results.transcripts`` (flat text),
+    ``results.items`` (timestamped word items, punctuation without timestamps),
+    and ``results.speaker_labels.segments`` (one per clinical turn, with a
+    ``speaker_label`` + [start_time, end_time] window). The segment windows are
+    aligned to the fixture dialog's numeric turn windows so that
+    enrichment.reconcile_segments_to_parties resolves spk_0 -> agent and spk_1 ->
+    patient by timestamp overlap. This is the SAME parse path the deployed
+    pipeline runs, so the fixture's structured turns mirror real output.
+
+    Speaker assignment by dialog window:
+      * dialog[0] agent   0.0 - 4.0   -> spk_0
+      * dialog[1] patient 4.0 - 7.5   -> spk_1
+      * dialog[2] agent   7.5 - 11.5  -> spk_0
+      * dialog[3] patient 11.5 - 16.0 -> spk_1
+    """
+    # Each segment: (speaker_label, start, end, [(word, word_start, word_end), ...],
+    # trailing_punct). Word windows stay inside the segment window so the parser
+    # buckets them correctly; trailing punctuation glues onto the last word.
+    segment_specs = [
+        ("spk_0", 0.0, 4.0,
+         [("What", 0.2, 0.6), ("brings", 0.6, 1.0), ("you", 1.0, 1.2),
+          ("in", 1.2, 1.4), ("today", 1.4, 2.0)], "?"),
+        ("spk_1", 4.0, 7.5,
+         [("I've", 4.2, 4.6), ("had", 4.6, 4.9), ("a", 4.9, 5.0),
+          ("bad", 5.0, 5.3), ("headache", 5.3, 5.9), ("since", 5.9, 6.3),
+          ("yesterday", 6.3, 7.0)], "."),
+        ("spk_0", 7.5, 11.5,
+         [("Have", 7.7, 8.0), ("you", 8.0, 8.2), ("taken", 8.2, 8.6),
+          ("anything", 8.6, 9.2), ("for", 9.2, 9.5), ("it", 9.5, 9.8)], "?"),
+        ("spk_1", 11.5, 16.0,
+         [("I", 11.7, 11.9), ("took", 11.9, 12.3), ("some", 12.3, 12.6),
+          ("ibuprofen", 12.6, 13.4), ("this", 13.4, 13.7),
+          ("morning", 13.7, 14.2), ("but", 14.2, 14.5), ("it", 14.5, 14.7),
+          ("didn't", 14.7, 15.1), ("help", 15.1, 15.4),
+          ("much", 15.4, 15.8)], "."),
+    ]
+
+    items: list = []
+    segments: list = []
+    for speaker, seg_start, seg_end, words, punct in segment_specs:
+        seg_items: list = []
+        for word, w_start, w_end in words:
+            items.append({
+                "type": "pronunciation",
+                "start_time": "{:.1f}".format(w_start),
+                "end_time": "{:.1f}".format(w_end),
+                "alternatives": [{"content": word}],
+            })
+            seg_items.append({
+                "start_time": "{:.1f}".format(w_start),
+                "end_time": "{:.1f}".format(w_end),
+                "speaker_label": speaker,
+            })
+        if punct:
+            items.append({
+                "type": "punctuation",
+                "alternatives": [{"content": punct}],
+            })
+        segments.append({
+            "speaker_label": speaker,
+            "start_time": "{:.1f}".format(seg_start),
+            "end_time": "{:.1f}".format(seg_end),
+            "items": seg_items,
+        })
+
+    flat = (
+        "What brings you in today? "
+        "I've had a bad headache since yesterday. "
+        "Have you taken anything for it? "
+        "I took some ibuprofen this morning but it didn't help much."
+    )
+    return {
+        "results": {
+            "transcripts": [{"transcript": flat}],
+            "items": items,
+            "speaker_labels": {"segments": segments},
+        }
+    }
 
 
 def main() -> None:

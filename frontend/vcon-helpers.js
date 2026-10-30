@@ -103,11 +103,16 @@ function findAnalysisByType(vcon, type) {
  * The pipeline emits more than one transcript-like surface: the LIVE dialog
  * turns (Deepgram STT, kept as dialog[] text turns) and the clinical-grade
  * Transcribe Medical transcript (an analysis entry of type 'transcript' with
- * `authoritative` set and a single plain-text `body` blob -- it does NOT carry
- * per-turn/speaker structure). The record view foregrounds that authoritative
- * transcript, so we pick the transcript entry whose `authoritative` is truthy.
- * If several transcript entries exist and none is marked authoritative, falls
- * back to the first transcript entry so callers still have something to show.
+ * `authoritative` set and a plain-text `body` blob). The record view
+ * foregrounds that authoritative transcript, so we pick the transcript entry
+ * whose `authoritative` is truthy. If several transcript entries exist and none
+ * is marked authoritative, falls back to the first transcript entry so callers
+ * still have something to show.
+ *
+ * The entry MAY now ALSO carry a structured `turns` array (speaker-attributed,
+ * timestamped turns reconciled by the pipeline) alongside the flat `body`. The
+ * flat `body` is always preserved for back-compat; use
+ * authoritativeTranscriptTurns(entry) to read the structured turns when present.
  */
 function findAuthoritativeTranscript(vcon) {
   var analysis = (vcon && vcon.analysis) || [];
@@ -120,6 +125,25 @@ function findAuthoritativeTranscript(vcon) {
     }
   }
   return firstTranscript;
+}
+
+/**
+ * Return the structured speaker turns on an authoritative transcript entry.
+ *
+ * The pipeline may up-level the authoritative transcript from a flat text blob
+ * into speaker-attributed turns (each ``{party?, speaker, start, end, text}``,
+ * as produced by enrichment.reconcile_segments_to_parties). Those turns live on
+ * the SAME analysis entry under `turns`. Returns that array when it is present
+ * and non-empty, else null so callers fall back to the flat `body` block.
+ *
+ * `party` may be null when reconciliation could not resolve patient/agent (the
+ * live dialog turns had non-numeric starts), in which case only the `speaker`
+ * (spk_N) label is meaningful -- callers must NOT guess patient/agent then.
+ */
+function authoritativeTranscriptTurns(entry) {
+  var turns = entry && entry.turns;
+  if (Array.isArray(turns) && turns.length > 0) return turns;
+  return null;
 }
 
 /* ---------- XSS-safe text / markdown rendering ---------- */
@@ -253,6 +277,7 @@ if (typeof module !== 'undefined' && module.exports) {
     findEntitiesAnalysisIndex: findEntitiesAnalysisIndex,
     findAnalysisByType: findAnalysisByType,
     findAuthoritativeTranscript: findAuthoritativeTranscript,
+    authoritativeTranscriptTurns: authoritativeTranscriptTurns,
     escapeHtml: escapeHtml,
     highlightRedactions: highlightRedactions,
     renderMarkdownSafe: renderMarkdownSafe
