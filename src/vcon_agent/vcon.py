@@ -337,6 +337,7 @@ class VConBuilder:
         dialog_indices: Sequence[int],
         vendor: str = "aws-transcribe-medical",
         authoritative: bool = True,
+        turns: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Append a 'transcript' analysis object with turn-index provenance.
 
@@ -350,10 +351,24 @@ class VConBuilder:
         natively. The clinical copy is marked ``authoritative`` so downstream
         consumers know which transcript to trust for clinical use.
 
+        Structured ``turns``: Transcribe Medical can emit speaker-labeled,
+        timestamped segments, so the authoritative transcript need not stay a
+        flat blob. When ``turns`` is provided and non-empty, the speaker-attributed
+        turns (each ``{'party'?, 'speaker', 'start', 'end', 'text'}``, as produced
+        by enrichment.reconcile_segments_to_parties) are stored on the SAME entry
+        under a new ``turns`` key (copied defensively) so the record view can
+        render the clinical transcript as turns like the live transcript. The flat
+        ``body`` text is ALWAYS preserved: it is the back-compat shape older
+        consumers read and the source the Bedrock summary is built from. When
+        ``turns`` is ``None`` or empty, the entry is byte-identical to the
+        flat-only shape (no ``turns`` key).
+
         🩹 Shortcut: provenance is a flat list of dialog turn indices mapped by
-        timestamp overlap (see enrichment.map_turns_by_timestamp_overlap).
-        → Production: robust alignment between the diarized medical transcript and
-        the live turns (word-level timing, speaker reconciliation).
+        timestamp overlap (see enrichment.map_turns_by_timestamp_overlap), and the
+        structured ``turns`` carry whatever party reconciliation could resolve
+        (``party`` may be ``None`` when the live turns have no numeric starts to
+        align against). → Production: robust alignment between the diarized medical
+        transcript and the live turns (word-level timing, speaker reconciliation).
         """
         entry: Dict[str, Any] = {
             "type": "transcript",
@@ -364,6 +379,10 @@ class VConBuilder:
             "body": transcript_text,
             "mimetype": "text/plain",
         }
+        # Structured speaker turns are additive: store them only when present so
+        # the flat-only entry shape stays byte-identical to before.
+        if turns:
+            entry["turns"] = [dict(t) for t in turns]
         self._doc["analysis"].append(entry)
         return entry
 

@@ -300,6 +300,63 @@ def test_add_transcript_analysis_authoritative_with_provenance():
     assert entry["body"] == "Patient reports a headache for two days."
 
 
+def test_add_transcript_analysis_stores_structured_turns():
+    builder = VConBuilder()
+    turns = [
+        {"party": 0, "speaker": "spk_0", "start": 1.0, "end": 5.0,
+         "text": "I have a headache."},
+        {"party": 1, "speaker": "spk_1", "start": 6.0, "end": 9.0,
+         "text": "How long?"},
+    ]
+    entry = builder.add_transcript_analysis(
+        "I have a headache. How long?",
+        dialog_indices=[0, 1],
+        turns=turns,
+    )
+
+    # The structured turns live on the SAME entry under a new `turns` key.
+    assert entry["turns"] == turns
+    # Defensive copy: mutating the input afterwards must not change the entry.
+    turns[0]["text"] = "mutated"
+    assert entry["turns"][0]["text"] == "I have a headache."
+    # The flat body and every existing key are preserved unchanged.
+    assert entry["type"] == "transcript"
+    assert entry["vendor"] == "aws-transcribe-medical"
+    assert entry["authoritative"] is True
+    assert entry["dialog"] == [0, 1]
+    assert entry["body"] == "I have a headache. How long?"
+    assert entry["mimetype"] == "text/plain"
+
+
+def test_add_transcript_analysis_without_turns_has_no_turns_key():
+    # Back-compat: omitting turns (or passing an empty list) yields the original
+    # flat-only entry shape with NO `turns` key.
+    builder = VConBuilder()
+    entry = builder.add_transcript_analysis("flat text", dialog_indices=[0])
+    assert "turns" not in entry
+    assert entry["body"] == "flat text"
+
+    empty_entry = builder.add_transcript_analysis(
+        "flat text 2", dialog_indices=[1], turns=[]
+    )
+    assert "turns" not in empty_entry
+
+
+def test_analysis_order_preserved_with_structured_turns():
+    # The deterministic analysis order (transcript, entities, summary) still holds
+    # when the transcript entry carries structured turns.
+    builder = VConBuilder()
+    builder.add_transcript_analysis(
+        "t",
+        dialog_indices=[0],
+        turns=[{"party": 0, "speaker": "spk_0", "start": 0.0, "end": 1.0, "text": "t"}],
+    )
+    builder.add_entities_analysis([{"category": "MEDICATION", "text": "x"}], 0)
+    builder.add_summary_analysis("s", dialog_indices=[0])
+    types = [a["type"] for a in builder.to_dict()["analysis"]]
+    assert types == ["transcript", "entities", "summary"]
+
+
 def test_add_transcript_analysis_can_be_non_authoritative():
     builder = VConBuilder()
     entry = builder.add_transcript_analysis(

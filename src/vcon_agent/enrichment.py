@@ -113,6 +113,247 @@ def map_turns_by_timestamp_overlap(
     return mapped
 
 
+def segments_from_transcribe_result(
+    result_json: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Parse a Transcribe Medical result into speaker SEGMENTS.
+
+    Transcribe Medical (with speaker labels enabled) writes a result JSON that
+    carries both a flat transcript AND the structured pieces needed to recover
+    speaker-attributed, timestamped turns:
+
+        {
+          "results": {
+            "transcripts": [{"transcript": "<flat text>"}],
+            "items": [
+              {"start_time": "0.0", "end_time": "0.5",
+               "alternatives": [{"content": "I"}]},
+              ...
+              {"type": "punctuation", "alternatives": [{"content": "."}]},
+            ],
+            "speaker_labels": {
+              "segments": [
+                {"speaker_label": "spk_0", "start_time": "0.0",
+                 "end_time": "1.2", "items": [...]},
+                ...
+              ]
+            }
+          }
+        }
+
+    This returns one dict per ``results.speaker_labels.segments[]`` entry, each
+    shaped ``{'speaker': 'spk_0'|'spk_1'|..., 'start': <float sec>,
+    'end': <float sec>, 'text': <str>}``. The segment ``text`` is rebuilt by
+    walking ``results.items[]`` and keeping the WORD items whose timestamps fall
+    inside the segment's [start, end] window:
+
+      * a WORD item carries ``start_time``/``end_time`` (coerced via
+        :func:`_as_float`); words join with a single space;
+      * a PUNCTUATION item has ``type == 'punctuation'`` and no timestamps, and
+        is attached to the PRECEDING word WITHOUT a leading space;
+      * each item's surface text is ``alternatives[0].content``.
+
+    Robustness / fallbacks:
+      * if ``results.speaker_labels`` is missing or has no segments, fall back to
+        a SINGLE ``{'speaker': 'spk_0', 'start': None, 'end': None, 'text': <flat
+        transcript>}`` segment (from :func:`transcript_text_from_transcribe_result`);
+      * if ``results.items`` is missing but a speaker segment exists, use the flat
+        transcript text as a last resort for that segment's text.
+
+    Pure, deterministic, dependency-free so a canned Transcribe-shaped dict makes
+    every path testable offline.
+
+    🩹 Shortcut: segment text is reconstructed by bucketing word items into each
+    speaker segment's [start, end] window and gluing punctuation onto the prior
+    word. → Production: true word-level alignment plus robust diarization /
+    channel separation (or let AWS HealthScribe emit speaker-attributed clinical
+    turns directly) rather than reassembling from the batch result here.
+    """
+    results = result_json.get("results") or {}
+    speaker_labels = results.get("speaker_labels") or {}
+    segments = speaker_labels.get("segments") or []
+    items = results.get("items") or []
+
+    flat_text = transcript_text_from_transcribe_result(result_json)
+
+    # Fallback: no diarization available -> one segment with the flat transcript.
+    if not segments:
+        return [{"speaker": "spk_0", "start": None, "end": None, "text": flat_text}]
+
+    # Precompute (start, end, content, is_punctuation) for every item once. Only
+    # word items (those carrying a numeric start) can be bucketed into a segment
+    # window; punctuation rides along with its preceding word.
+    parsed_items: List[Dict[str, Any]] = []
+    for item in items:
+        alternatives = item.get("alternatives") or []
+        content = alternatives[0].get("content") if alternatives else ""
+        is_punct = item.get("type") == "punctuation"
+        start = _as_float(item.get("start_time"))
+        end = _as_float(item.get("end_time"))
+        parsed_items.append(
+            {
+                "start": start,
+                "end": end,
+                "content": content or "",
+                "is_punct": is_punct,
+            }
+        )
+
+    out: List[Dict[str, Any]] = []
+    for seg in segments:
+        speaker = seg.get("speaker_label", "spk_0")
+        seg_start = _as_float(seg.get("start_time"))
+        seg_end = _as_float(seg.get("end_time"))
+
+        # Collect the word items whose [start, end] falls inside this segment's
+        # window, attaching any punctuation that immediately follows a kept word.
+        text = ""
+        if parsed_items and seg_start is not None and seg_end is not None:
+            text = _text_for_window(parsed_items, seg_start, seg_end)
+
+        # Last resort: a segment exists but no items were bucketed into it (items
+        # missing, or no numeric window). Use the flat transcript text.
+        if not text:
+            text = flat_text
+
+        out.append(
+            {
+                "speaker": speaker,
+                "start": seg_start,
+                "end": seg_end,
+                "text": text,
+            }
+        )
+    return out
+
+
+def _text_for_window(
+    parsed_items: Sequence[Dict[str, Any]],
+    seg_start: float,
+    seg_end: float,
+) -> str:
+    """Join the word items whose timing falls in [seg_start, seg_end].
+
+    Words join with a single space; a punctuation item (no timestamps) is glued
+    onto the immediately preceding kept word with no leading space. Punctuation
+    is only kept when the word right before it was kept (so trailing punctuation
+    of a different segment's word never leaks in).
+    """
+    pieces: List[str] = []
+    kept_previous_word = False
+    for item in parsed_items:
+        if item["is_punct"]:
+            # Attach to the preceding word only if that word was kept.
+            if kept_previous_word and pieces:
+                pieces[-1] = pieces[-1] + item["content"]
+            continue
+        start = item["start"]
+        end = item["end"]
+        if start is None:
+            kept_previous_word = False
+            continue
+        # A word belongs to the segment when its start falls within the window.
+        # Using end (falling back to start) keeps a word that ends exactly at the
+        # boundary.
+        word_end = end if end is not None else start
+        if seg_start <= start and word_end <= seg_end:
+            pieces.append(item["content"])
+            kept_previous_word = True
+        else:
+            kept_previous_word = False
+    return " ".join(pieces).strip()
+
+
+def reconcile_segments_to_parties(
+    medical_segments: Sequence[Dict[str, Any]],
+    dialog_turns: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Reconcile Transcribe speaker segments to the fixed party indices.
+
+    Takes the speaker SEGMENTS produced by
+    :func:`segments_from_transcribe_result` (each ``{'speaker', 'start', 'end',
+    'text'}``) and the vCon ``dialog`` turns, and returns one structured TURN per
+    segment, shaped ``{'party': <int|None>, 'speaker': 'spk_0'|..., 'start':
+    <float|None>, 'end': <float|None>, 'text': <str>}``.
+
+    Algorithm:
+      1. :func:`map_turns_by_timestamp_overlap` gives, per segment, the dialog
+         turn indices it overlaps in time.
+      2. For every overlapped turn, read its party (``dialog_turns[idx]['party']``).
+      3. Build a CONSISTENT ``spk_N -> party`` mapping by majority vote: for each
+         speaker label, tally the parties of all turns that any of its segments
+         overlap, and map the label to the majority party. A tie or no votes maps
+         to ``None`` so one speaker label never gets two different parties.
+      4. Emit one turn per segment carrying its label's reconciled party.
+
+    CRITICAL FALLBACK: :func:`map_turns_by_timestamp_overlap` only aligns turns
+    whose ``start`` is a usable NUMBER; an ISO-string start coerces to ``None``
+    (via :func:`_as_float`) and that turn is skipped. So when NO dialog turn has a
+    numeric start (the live Deepgram turns record ISO wall-clock starts, not
+    per-turn second offsets), every segment overlaps nothing, every party resolves
+    to ``None``, and each turn keeps ONLY its ``spk_N`` speaker label. We do NOT
+    guess patient vs. agent in that case.
+
+    This is design option (b): fall back to Transcribe's own ``spk_N`` labels
+    rather than mis-assigning patient/agent from unalignable data. The proper fix
+    (option that makes reconciliation resolve) is having the agent record NUMERIC
+    per-turn offsets for the live dialog so time overlap can run; that is OUT OF
+    SCOPE here and is flagged for production.
+
+    Pure, deterministic, dependency-free.
+    """
+    overlaps = map_turns_by_timestamp_overlap(medical_segments, dialog_turns)
+
+    # Tally, per speaker label, the parties of every overlapped dialog turn.
+    votes: Dict[str, Dict[Any, int]] = {}
+    for seg, covered in zip(medical_segments, overlaps):
+        speaker = seg.get("speaker", "spk_0")
+        tally = votes.setdefault(speaker, {})
+        for idx in covered:
+            party = dialog_turns[idx].get("party")
+            if party is None:
+                continue
+            tally[party] = tally.get(party, 0) + 1
+
+    # Resolve each speaker label to a single majority party (ties / none -> None).
+    label_to_party: Dict[str, Optional[int]] = {}
+    for speaker, tally in votes.items():
+        label_to_party[speaker] = _majority_party(tally)
+
+    turns: List[Dict[str, Any]] = []
+    for seg in medical_segments:
+        speaker = seg.get("speaker", "spk_0")
+        turns.append(
+            {
+                "party": label_to_party.get(speaker),
+                "speaker": speaker,
+                "start": seg.get("start"),
+                "end": seg.get("end"),
+                "text": seg.get("text", ""),
+            }
+        )
+    return turns
+
+
+def _majority_party(tally: Dict[Any, int]) -> Optional[int]:
+    """Return the single party with the strict majority of votes, else ``None``.
+
+    An empty tally (no overlapped turns, or none carried a party) yields
+    ``None``. A tie between two parties also yields ``None`` so one speaker label
+    is never force-mapped to an arbitrary party.
+    """
+    if not tally:
+        return None
+    ordered = sorted(tally.items(), key=lambda kv: kv[1], reverse=True)
+    if len(ordered) >= 2 and ordered[0][1] == ordered[1][1]:
+        return None
+    winner = ordered[0][0]
+    try:
+        return int(winner)
+    except (TypeError, ValueError):
+        return winner
+
+
 def extract_min_entities(comprehend_response: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Shape a Comprehend Medical DetectEntitiesV2 response to the minimal set.
 
