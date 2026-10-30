@@ -741,10 +741,26 @@ Resources:
           BEDROCK_MODEL_ID: !Ref BedrockModelId
       Code:
         ZipFile: |
-          # Bedrock: produce a physician-facing summary of the dialog.
-          # summary_prompt_from_dialog + summary_text_from_bedrock_response are
-          # mirrored from enrichment.py so the shaping is identical to the
+          # Bedrock: produce a physician-facing summary from the AUTHORITATIVE
+          # Transcribe Medical transcript (the transcript_text this branch
+          # receives in its event), NOT the live Deepgram dialog[] turns.
+          # summary_prompt_from_transcript + summary_text_from_bedrock_response
+          # are mirrored from enrichment.py so the shaping is identical to the
           # offline-tested pure copy.
+          #
+          # Why the authoritative transcript? The live transcript can mis-hear
+          # clinical terms (e.g. a medication name heard as a common word), and
+          # summarizing from it propagates the error; Transcribe Medical captures
+          # those terms correctly, so the clinical artifact is built from the
+          # clinically-accurate source.
+          #
+          # 🩹 Shortcut → Production: summarizing from the authoritative blob is
+          # clinically correct for medication names but LOSES the clean speaker
+          # attribution the live dialog turns provide (the blob is one
+          # undifferentiated string). Production should reconcile the diarized
+          # medical transcript with the live turns to get BOTH speaker structure
+          # AND clinical accuracy (see map_turns_by_timestamp_overlap in
+          # enrichment.py, unit-tested but intentionally not wired into the demo).
           #
           # Unwrap convention: one event.get("vcon", event) yields the vCon doc.
           import json
@@ -756,26 +772,16 @@ Resources:
           _BEDROCK = boto3.client("bedrock-runtime")
 
 
-          def _summary_prompt_from_dialog(dialog_turns):
-              lines = []
-              for turn in dialog_turns:
-                  if turn.get("type") != "text":
-                      continue
-                  party = turn.get("party")
-                  speaker = (
-                      "Patient" if party == 0
-                      else "Agent" if party == 1
-                      else "Unknown"
-                  )
-                  lines.append("{}: {}".format(speaker, turn.get("body", "")))
-              transcript = "\n".join(lines)
+          def _summary_prompt_from_transcript(transcript_text):
+              # Present the authoritative transcript verbatim; do NOT fabricate
+              # Patient/Agent labels the blob does not carry.
               return (
                   "You are a clinical documentation assistant. Write a concise, "
                   "factual physician-facing summary of the following patient "
                   "intake conversation. Include the chief complaint, duration, "
                   "and any medications mentioned. Do not add diagnoses or "
                   "recommendations.\n\nConversation:\n"
-                  + transcript
+                  + transcript_text
                   + "\n\nSummary:"
               )
 
@@ -815,7 +821,12 @@ Resources:
 
           def handler(event, context):
               vcon = event.get("vcon", event)
-              prompt = _summary_prompt_from_dialog(vcon.get("dialog", []))
+              # Build the prompt from the AUTHORITATIVE Transcribe Medical
+              # transcript text that the Analyze Parallel state passes to this
+              # branch (the same transcript_text the Comprehend branch reads),
+              # NOT from the live dialog[] turns.
+              transcript_text = event.get("transcript_text", "") or ""
+              prompt = _summary_prompt_from_transcript(transcript_text)
 
               summary_text = ""
               # 🩹 Fail-open for demo-runnability: if Bedrock is unavailable

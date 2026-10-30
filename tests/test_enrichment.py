@@ -10,6 +10,7 @@ from vcon_agent.enrichment import (
     map_turns_by_timestamp_overlap,
     s3_location_from_transcribe_uri,
     summary_prompt_from_dialog,
+    summary_prompt_from_transcript,
     summary_text_from_bedrock_response,
     transcript_text_from_transcribe_result,
 )
@@ -193,6 +194,47 @@ def test_summary_prompt_labels_speakers_and_skips_non_text():
     # The instruction framing is present and deterministic.
     assert prompt.startswith("You are a clinical documentation assistant.")
     assert prompt.rstrip().endswith("Summary:")
+
+
+# ----------------------------------------------------------------------------
+# summary_prompt_from_transcript
+# ----------------------------------------------------------------------------
+
+
+def test_summary_prompt_from_transcript_contains_transcript_text():
+    # The authoritative transcript blob must appear verbatim in the prompt, so a
+    # clinical term the live STT could mis-hear (e.g. a medication name) is
+    # carried through correctly.
+    transcript = "Patient has been taking sertraline for anxiety for two weeks."
+    prompt = summary_prompt_from_transcript(transcript)
+    assert transcript in prompt
+    assert "sertraline" in prompt
+
+
+def test_summary_prompt_from_transcript_carries_physician_instruction():
+    prompt = summary_prompt_from_transcript("some transcript text")
+    assert prompt.startswith("You are a clinical documentation assistant.")
+    assert prompt.rstrip().endswith("Summary:")
+
+
+def test_summary_prompt_from_transcript_does_not_fabricate_speaker_labels():
+    # The authoritative blob has no speaker attribution; the builder must take a
+    # plain string and NOT invent Patient:/Agent: labels or depend on dialog
+    # turns.
+    transcript = "Chief complaint is a headache for two days. Taking ibuprofen."
+    prompt = summary_prompt_from_transcript(transcript)
+    assert "Patient:" not in prompt
+    assert "Agent:" not in prompt
+
+
+def test_summary_prompt_from_transcript_shares_instruction_with_dialog_builder():
+    # Both builders wrap their body with the same instruction preamble so the
+    # wording cannot drift between the two prompt sources.
+    preamble = summary_prompt_from_dialog([]).split("\n\nConversation:\n")[0]
+    transcript_preamble = summary_prompt_from_transcript("x").split(
+        "\n\nConversation:\n"
+    )[0]
+    assert preamble == transcript_preamble
 
 
 # ----------------------------------------------------------------------------

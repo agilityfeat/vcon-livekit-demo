@@ -220,6 +220,31 @@ def s3_location_from_transcribe_uri(uri: str) -> Optional[tuple]:
     return None
 
 
+# The physician-summary instruction + framing is defined ONCE here and reused by
+# both prompt builders (dialog-sourced and transcript-sourced) so the wording
+# cannot drift between them. Keep this byte-identical to the inline mirror in
+# infrastructure/template.yaml's BedrockFunction body.
+_SUMMARY_INSTRUCTION = (
+    "You are a clinical documentation assistant. Write a concise, factual "
+    "physician-facing summary of the following patient intake conversation. "
+    "Include the chief complaint, duration, and any medications mentioned. "
+    "Do not add diagnoses or recommendations."
+)
+
+
+def _summary_prompt(transcript: str) -> str:
+    """Wrap a transcript body between the shared instruction and the 'Summary:'
+    marker. The single framing both builders share, so the exact wording is
+    defined once.
+    """
+    return (
+        f"{_SUMMARY_INSTRUCTION}\n\n"
+        "Conversation:\n"
+        f"{transcript}\n\n"
+        "Summary:"
+    )
+
+
 def summary_prompt_from_dialog(dialog_turns: Sequence[Dict[str, Any]]) -> str:
     """Build the Bedrock physician-summary prompt from the dialog turns.
 
@@ -241,15 +266,36 @@ def summary_prompt_from_dialog(dialog_turns: Sequence[Dict[str, Any]]) -> str:
         body = turn.get("body", "")
         lines.append(f"{speaker}: {body}")
     transcript = "\n".join(lines)
-    return (
-        "You are a clinical documentation assistant. Write a concise, factual "
-        "physician-facing summary of the following patient intake conversation. "
-        "Include the chief complaint, duration, and any medications mentioned. "
-        "Do not add diagnoses or recommendations.\n\n"
-        "Conversation:\n"
-        f"{transcript}\n\n"
-        "Summary:"
-    )
+    return _summary_prompt(transcript)
+
+
+def summary_prompt_from_transcript(transcript_text: str) -> str:
+    """Build the Bedrock physician-summary prompt from the AUTHORITATIVE transcript.
+
+    Takes the single transcript string produced by
+    ``transcript_text_from_transcribe_result`` (the Transcribe Medical result
+    stored authoritative in analysis[]) and wraps it with the SAME
+    physician-summary instruction used by ``summary_prompt_from_dialog``. The
+    body is presented as the clinical transcript text verbatim: no fabricated
+    Patient/Agent speaker labels, because the authoritative blob does not carry
+    speaker attribution. Pure and deterministic so the exact prompt is testable.
+
+    Why source the summary from the authoritative transcript instead of the live
+    dialog turns? The live (Deepgram) transcript can mis-hear clinical terms
+    (e.g. a medication name heard as a common word), and summarizing from it
+    propagates that error. Transcribe Medical captures those terms correctly, so
+    the clinical artifact (the summary) is built from the clinically-accurate
+    source.
+
+    🩹 Shortcut → Production: summarizing from the authoritative transcript blob
+    is clinically correct for terms like medication names, but it LOSES the clean
+    speaker attribution the live dialog turns provide (the blob is one
+    undifferentiated string). Production should reconcile the diarized medical
+    transcript with the live turns to get BOTH speaker structure AND clinical
+    accuracy, e.g. via the existing ``map_turns_by_timestamp_overlap`` helper
+    (unit-tested but intentionally not wired into the demo).
+    """
+    return _summary_prompt(transcript_text)
 
 
 def summary_text_from_bedrock_response(response: Dict[str, Any]) -> str:
