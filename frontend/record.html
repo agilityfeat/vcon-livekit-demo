@@ -10,10 +10,13 @@
 
   Doctor view: the salvaged rendering plus the medication->audio provenance
   seek (click a MEDICATION entity to jump the audio to the dialog turn it was
-  mentioned in). Analyst view: the redacted record plus a full<->redacted
-  linkage banner that confirms "same vCon" via the REAL model
-  (redacted.redacted.uuid === full.uuid) and surfaces the pointer's content_hash
-  + s3:// url.
+  mentioned in), with the recording streamed from a short-lived presigned URL.
+  Analyst view: the redacted record led by a "De-identified — PHI masked"
+  headline with [REDACTED] tokens highlighted inline; the full<->redacted
+  "same vCon" linkage proof (uuids, pointer type, content_hash) is demoted into
+  a collapsed verification section, and the full copy's s3:// url is NOT
+  surfaced (only labeled as an encrypted, inaccessible reference). The full
+  recording audio is withheld from this view.
 
   🩹 Demo shortcut: no auth; the doctor/analyst "role" is this client-side
   toggle, so anyone can see either view. → Production: role-gated, audit-logged

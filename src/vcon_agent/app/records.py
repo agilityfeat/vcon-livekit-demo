@@ -67,6 +67,17 @@ SIGNED_OBJECT = "vcon-signed.jws"
 FULL_OBJECT = "vcon-full.jwe"
 REDACTED_OBJECT = "vcon-redacted.jws"
 
+# The LiveKit egress writes the raw call recording as a sibling of the seal
+# artifacts under the same run-key prefix, so the recording dialog object's
+# s3:// url is <run_prefix>/recording.ogg. The viewer plays it via a short-lived
+# presigned GET (see presigned_recording_url); it is never streamed in-browser
+# straight from the s3:// reference.
+RECORDING_OBJECT = "recording.ogg"
+
+# How long a presigned recording GET URL stays valid. Short enough that a leaked
+# link expires quickly, long enough to listen through a call.
+RECORDING_URL_EXPIRES_SECONDS = 3600
+
 
 # ---------------------------------------------------------------------------
 # Typed errors.
@@ -242,6 +253,38 @@ def list_records(
             prefixes.append(run_prefix)
     prefixes.sort()
     return [_descriptor_for_prefix(p) for p in prefixes]
+
+
+def presigned_recording_url(
+    s3_client: Any,
+    bucket: str,
+    run_prefix: str,
+    expires_in: int = RECORDING_URL_EXPIRES_SECONDS,
+) -> str:
+    """Return a short-lived presigned GET URL for a run's ``recording.ogg``.
+
+    The recording object is a sibling of the seal artifacts under the run-key
+    prefix (``<run_prefix>/recording.ogg``). The browser cannot play the raw
+    ``s3://`` reference carried by the recording dialog object, so the viewer
+    asks the backend for a presigned GET it CAN play.
+
+    ``s3_client`` is INJECTED exactly like the listing / get helpers, so unit
+    tests pass a fake whose ``generate_presigned_url`` returns a canned string
+    and no boto3 is needed. The real boto3 client exposes the same method.
+
+    🩹 Shortcut: the presigned URL is minted with NO authZ check, so anyone who
+    can reach this endpoint gets the un-redacted audio; it also always targets
+    ``recording.ogg`` (the pipeline's fixed object name). → Production: gate the
+    presign behind per-role authZ (full audio to authorized clinicians only),
+    audit-log the access, and derive the object key from the vCon rather than a
+    constant.
+    """
+    key = "{}/{}".format(run_prefix, RECORDING_OBJECT)
+    return s3_client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket, "Key": key},
+        ExpiresIn=expires_in,
+    )
 
 
 def _get_object_bytes(s3_client: Any, bucket: str, key: str) -> bytes:
@@ -480,6 +523,22 @@ class RecordsStore:
         descriptor = _descriptor_for_prefix(run_prefix)
         return load_redacted_record(
             self._ensure_s3(), self.private_key, self.bucket, descriptor.redacted_key
+        )
+
+    def recording_url(self, run_prefix: str) -> Optional[str]:
+        """Return a presigned GET URL for the run's recording, or ``None``.
+
+        In S3 mode this mints a short-lived presigned GET for
+        ``<run_prefix>/recording.ogg`` so the viewer can play the real call
+        audio. In OFFLINE/fixtures mode there is no live S3 object (the sample
+        pair carries only an ``s3://`` reference, no real recording), so this
+        returns ``None`` and the frontend shows a clean "no audio in offline /
+        demo mode" note rather than erroring.
+        """
+        if self.is_offline:
+            return None
+        return presigned_recording_url(
+            self._ensure_s3(), self.bucket, run_prefix
         )
 
 

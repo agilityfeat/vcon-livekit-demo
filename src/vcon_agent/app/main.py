@@ -19,6 +19,7 @@ Endpoints:
   * ``GET  /api/records``                    -- list call records.
   * ``GET  /api/records/{run_prefix}/full``  -- doctor full (decrypted) vCon.
   * ``GET  /api/records/{run_prefix}/redacted`` -- analyst redacted vCon.
+  * ``GET  /api/records/{run_prefix}/audio`` -- presigned GET for the recording.
 The static ``frontend/`` directory is mounted at ``/`` so the single ``uvicorn``
 process serves both the API and the UI.
 """
@@ -128,6 +129,35 @@ def create_app(
         except records_mod.RecordKeyMismatchError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return records_mod.shape_record_for_frontend(doc)
+
+    @app.get("/api/records/{run_prefix:path}/audio")
+    def get_audio(run_prefix: str) -> Dict[str, Any]:
+        """Return a short-lived presigned GET URL for the run's recording.
+
+        The recording dialog object only carries an ``s3://`` reference a browser
+        cannot play, so the viewer asks here for a presigned URL it CAN stream.
+        In OFFLINE/fixtures mode (no ``BUCKET_NAME``) there is no live S3 object,
+        so ``store.recording_url`` returns ``None`` and this responds with 404 so
+        the frontend shows a clean "no audio in offline / demo mode" note rather
+        than treating an empty url as playable.
+
+        🩹 Demo shortcut: this route is role-agnostic and does no authZ, so the
+        FRONTEND is responsible for only requesting audio in the doctor view --
+        serving the full recording in the analyst view would undercut the
+        redaction story. → Production: gate the presign behind per-role authZ and
+        audit-log it, so the un-redacted audio is reachable only by authorized
+        clinicians.
+        """
+        try:
+            url = store.recording_url(run_prefix)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if not url:
+            raise HTTPException(
+                status_code=404,
+                detail="No playable recording for this record (offline/demo mode).",
+            )
+        return {"url": url}
 
     # Serve the static frontend from the same process. Guarded so the app still
     # imports/starts before the frontend/ directory is authored.

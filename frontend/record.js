@@ -133,9 +133,48 @@ function renderLinkBanner() {
   banner.hidden = false;
   banner.innerHTML = '';
 
-  var h = document.createElement('h2');
-  h.textContent = 'Redacted record — linked to the full record via `redacted`';
-  banner.appendChild(h);
+  // HEADLINE: lead with the redaction story so an analyst immediately reads
+  // "this is the de-identified record, PHI is masked" -- analogous to how the
+  // doctor view's headline is the medication->audio provenance. The linkage
+  // proof (uuids / pointer / content_hash) is demoted below into a collapsed
+  // "Verification / provenance" section.
+  var badge = document.createElement('div');
+  badge.className = 'redaction-badge';
+  var title = document.createElement('span');
+  title.className = 'redaction-badge-title';
+  title.textContent = '🔒 De-identified record — PHI masked';
+  badge.appendChild(title);
+  var sub = document.createElement('p');
+  sub.className = 'redaction-badge-sub';
+  sub.textContent =
+    'This is the analyst view. Personal health information has been removed ' +
+    'and replaced with [REDACTED]; the full recording audio is withheld.';
+  badge.appendChild(sub);
+  banner.appendChild(badge);
+
+  // The "same vCon" assurance stays, but as a secondary, quieter line beneath
+  // the headline (not the lead).
+  var tag = document.createElement('span');
+  if (link.linked) {
+    tag.className = 'same-vcon';
+    tag.textContent = '✓ Same vCon, redacted version';
+  } else {
+    tag.className = 'same-vcon mismatch';
+    tag.textContent = '✗ Link mismatch — not confirmed the same vCon';
+  }
+  banner.appendChild(tag);
+
+  // DEMOTED: the uuid-pair + pointer details live in a collapsed <details> so
+  // they read as secondary verification data, not a debug dump. The full
+  // copy's s3:// url is NOT surfaced plainly -- it is tucked inside here and
+  // clearly labeled as an encrypted reference that is not accessible from this
+  // view, so an analyst is never led to the full PHI copy's location.
+  var details = document.createElement('details');
+  details.className = 'verification';
+
+  var summary = document.createElement('summary');
+  summary.textContent = 'Verification / provenance';
+  details.appendChild(summary);
 
   var pair = document.createElement('div');
   pair.className = 'uuid-pair';
@@ -155,27 +194,21 @@ function renderLinkBanner() {
   pair.appendChild(fullBox);
   pair.appendChild(redBox);
   pair.appendChild(linkBox);
-  banner.appendChild(pair);
+  details.appendChild(pair);
 
-  var tag = document.createElement('span');
-  if (link.linked) {
-    tag.className = 'same-vcon';
-    tag.textContent = '✓ Same vCon, redacted version';
-  } else {
-    tag.className = 'same-vcon mismatch';
-    tag.textContent = '✗ Link mismatch — not confirmed the same vCon';
-  }
-  banner.appendChild(tag);
-
-  // Surface the real pointer details: content type, s3:// url, content_hash.
+  // Keep content type + content_hash (the portability/linkage proof). The
+  // full-copy s3:// url is intentionally labeled, not shown as a reachable
+  // location.
   var detail = document.createElement('p');
   detail.className = 'pointer-detail';
   detail.textContent =
     'pointer.type: ' + (link.pointerType || '(none)') + '\n' +
-    'pointer.url: ' + (link.pointerUrl || '(none)') + '\n' +
-    'pointer.content_hash: ' + (link.pointerContentHash || '(none)');
+    'pointer.content_hash: ' + (link.pointerContentHash || '(none)') + '\n' +
+    'full copy: encrypted full-copy reference (not accessible from this view)';
   detail.style.whiteSpace = 'pre-wrap';
-  banner.appendChild(detail);
+  details.appendChild(detail);
+
+  banner.appendChild(details);
 }
 
 function addMeta(dl, key, value) {
@@ -210,18 +243,53 @@ function renderAudio(doc) {
     return;
   }
   var src = rec.url;
-  if (/^s3:\/\//i.test(src)) {
-    // 🩹 Demo: the recording url is an s3:// reference (not playable in a
-    // browser) and no real audio is bundled, so the <audio> may have nothing
-    // to play. The medication->seek still sets currentTime against the dialog
-    // turn's numeric start so the provenance behavior is demonstrable.
-    // → Production: the viewer streams the recording from a signed URL.
-    audioEl.removeAttribute('src');
-    note.textContent = 'Audio is not available for this record.';
-  } else {
+  if (!/^s3:\/\//i.test(src)) {
+    // A directly-playable url (e.g. a local fixture clip): use it as-is.
     audioEl.src = src;
     note.textContent = 'Audio source: ' + rec.url;
+    return;
   }
+
+  // 🩹 The recording url is an s3:// reference a browser cannot play. In the
+  // DOCTOR view we fetch a short-lived presigned GET from /audio and stream
+  // THAT; in offline/demo mode the backend has no real object and returns 404,
+  // so we show a clean "not available" note. The medication->seek still sets
+  // currentTime against the dialog turn's numeric start regardless, so the
+  // provenance behavior is demonstrable even with no audio loaded.
+  //
+  // In the ANALYST view we deliberately do NOT request the audio: a presigned
+  // GET for the full recording is the un-redacted audio, so serving it in the
+  // de-identified view would undercut the redaction story. The audio stays
+  // withheld there.
+  audioEl.removeAttribute('src');
+  if (state.mode === 'analyst') {
+    note.textContent = 'Audio is withheld from the de-identified view.';
+    return;
+  }
+  note.textContent = 'Loading audio…';
+  fetchAudioUrl().then(function (url) {
+    if (url) {
+      audioEl.src = url;
+      note.textContent = 'Recording ready.';
+    } else {
+      note.textContent = 'Audio is not available in offline/demo mode.';
+    }
+  }).catch(function () {
+    note.textContent = 'Audio is not available in offline/demo mode.';
+  });
+}
+
+// Ask the backend for a presigned GET url for this run's recording. Returns
+// null on 404 (offline/demo mode or no recording) so renderAudio can show a
+// clean note instead of erroring. Reuses the same run prefix the full/redacted
+// views are fetched with; the bucket is NEVER hardcoded in the frontend.
+async function fetchAudioUrl() {
+  var url = '/api/records/' + state.run.split('/').map(encodeURIComponent).join('/') +
+    '/audio';
+  var resp = await fetch(url);
+  if (!resp.ok) return null;
+  var data = await resp.json();
+  return data && data.url ? data.url : null;
 }
 
 function renderParties(doc) {
@@ -235,8 +303,14 @@ function renderParties(doc) {
     li.appendChild(label);
     var meta = document.createElement('span');
     meta.className = 'party-role';
-    meta.textContent = ' — index ' + i + ', role: ' + (p.role || '?') +
-      ', name: ' + (p.name == null ? '' : p.name);
+    // Escape first, then highlight any [REDACTED] masked name so the viewer
+    // visibly sees which party fields the de-identification removed. Safe:
+    // highlightRedactions only acts on the fixed escaped token.
+    meta.innerHTML = escapeHtml(
+      ' — index ' + i + ', role: ' + (p.role || '?') +
+      ', name: ' + (p.name == null ? '' : p.name)
+    );
+    meta.innerHTML = highlightRedactions(meta.innerHTML);
     li.appendChild(meta);
     ol.appendChild(li);
   });
@@ -330,7 +404,12 @@ function renderSummary(doc) {
     prov.textContent = '';
     return;
   }
-  p.textContent = entry.body || '';
+  // The Bedrock summary body is markdown. Render it as HTML via the shared
+  // XSS-safe renderer (escape first, THEN apply the markdown subset + [REDACTED]
+  // highlighting), so **bold**/bullets/headings display as formatting instead
+  // of raw characters -- and model output can never inject markup. The
+  // provenance line stays plain textContent.
+  p.innerHTML = renderMarkdownSafe(entry.body || '');
   prov.textContent = Array.isArray(entry.dialog)
     ? 'Provenance: dialog turns ' + entry.dialog.join(', ')
     : '';
@@ -352,7 +431,15 @@ function renderDialog(doc) {
     spk.textContent = speakerLabelForPartyIndex(doc, turn.party) + ':';
     li.appendChild(spk);
 
-    li.appendChild(document.createTextNode(' ' + (turn.body == null ? '' : turn.body)));
+    // Escape the turn body first, then highlight any [REDACTED] token so masked
+    // spans are visibly marked in the analyst view. XSS-safe: only the escaped
+    // fixed token is wrapped; the rest stays escaped text.
+    var bodyText = document.createElement('span');
+    bodyText.className = 'turn-body';
+    bodyText.innerHTML = highlightRedactions(
+      escapeHtml(' ' + (turn.body == null ? '' : turn.body))
+    );
+    li.appendChild(bodyText);
 
     var time = document.createElement('span');
     time.className = 'turn-time';

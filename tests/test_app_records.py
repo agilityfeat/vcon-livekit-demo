@@ -102,6 +102,7 @@ class FakeS3Client:
         self._objects = objects or {}
         self.list_calls = []
         self.get_calls = []
+        self.presign_calls = []
 
     def list_objects_v2(self, **kwargs):
         self.list_calls.append(kwargs)
@@ -113,6 +114,16 @@ class FakeS3Client:
         if key not in self._objects:
             raise KeyError("no such key: {}".format(key))
         return {"Body": self._objects[key]}
+
+    def generate_presigned_url(self, *args, **kwargs):
+        # Mirror boto3's signature loosely and return a canned URL so the
+        # presign path is testable without boto3 / network. Records the call so
+        # tests can assert the operation, bucket, key, and expiry.
+        self.presign_calls.append({"args": args, "kwargs": kwargs})
+        params = kwargs.get("Params", {})
+        return "https://signed.example/{}?X-Amz-Expires={}".format(
+            params.get("Key", ""), kwargs.get("ExpiresIn", "")
+        )
 
 
 def _canned_listing(*run_prefixes):
@@ -410,6 +421,53 @@ def test_shape_record_leaves_non_numeric_start_untouched():
 
 
 # ---------------------------------------------------------------------------
+# Presigned recording URL: injected client, offline returns None.
+# ---------------------------------------------------------------------------
+
+
+def test_presigned_recording_url_targets_recording_object():
+    s3 = FakeS3Client()
+    url = rec.presigned_recording_url(s3, BUCKET, RUN_PREFIX)
+
+    # The presign was for a GET of <run_prefix>/recording.ogg in the bucket,
+    # with the configured expiry.
+    call = s3.presign_calls[0]
+    assert call["args"][0] == "get_object"
+    assert call["kwargs"]["Params"]["Bucket"] == BUCKET
+    assert call["kwargs"]["Params"]["Key"] == "{}/{}".format(
+        RUN_PREFIX, rec.RECORDING_OBJECT
+    )
+    assert call["kwargs"]["ExpiresIn"] == rec.RECORDING_URL_EXPIRES_SECONDS
+    # The canned URL from the fake is returned verbatim.
+    assert url.startswith("https://signed.example/")
+
+
+def test_presigned_recording_url_honors_custom_expiry():
+    s3 = FakeS3Client()
+    rec.presigned_recording_url(s3, BUCKET, RUN_PREFIX, expires_in=120)
+    assert s3.presign_calls[0]["kwargs"]["ExpiresIn"] == 120
+
+
+def test_records_store_recording_url_s3_path(keypair):
+    s3 = FakeS3Client()
+    store = rec.RecordsStore(bucket=BUCKET, private_key=keypair, s3_client=s3)
+    url = store.recording_url(RUN_PREFIX)
+    assert url.startswith("https://signed.example/")
+    assert s3.presign_calls[0]["kwargs"]["Params"]["Key"].endswith(
+        "/" + rec.RECORDING_OBJECT
+    )
+
+
+def test_records_store_recording_url_offline_returns_none(keypair, tmp_path):
+    # Offline (no bucket): there is no live S3 object, so no presigned URL.
+    store = rec.RecordsStore(
+        bucket=None, private_key=keypair, fixtures_dir=str(tmp_path)
+    )
+    assert store.is_offline is True
+    assert store.recording_url("fixtures/sample-call") is None
+
+
+# ---------------------------------------------------------------------------
 # Route-level mapping: key mismatch -> 409, missing record -> 404 (fastapi).
 # ---------------------------------------------------------------------------
 
@@ -462,3 +520,38 @@ def test_route_maps_key_mismatch_to_409_and_missing_to_404():
     # The 409 body carries the actionable message, not a stack trace.
     body = client.get("/api/records/mismatch/full").json()
     assert "VCON_SIGNING_PRIVATE_JWK" in body["detail"]
+
+
+class _AudioStore:
+    """Minimal store stub for the /audio route.
+
+    ``run_prefix`` 'live' -> a presigned URL (expected 200 + {url}),
+    'offline' -> None (expected 404, offline/demo mode).
+    """
+
+    def list_records(self):
+        return []
+
+    def recording_url(self, run_prefix):
+        if run_prefix == "live":
+            return "https://signed.example/live/recording.ogg?X-Amz-Expires=3600"
+        return None
+
+
+def test_audio_route_returns_url_in_live_mode_and_404_offline():
+    """The /audio route returns {url} when a presigned URL exists and 404 when
+    the store has no playable recording (offline/demo mode)."""
+    pytest.importorskip("fastapi", reason="fastapi not installed; route test skipped")
+    from fastapi.testclient import TestClient
+
+    from vcon_agent.app.main import create_app
+
+    app = create_app(env={}, store=_AudioStore())
+    client = TestClient(app)
+
+    live = client.get("/api/records/live/audio")
+    assert live.status_code == 200
+    assert live.json()["url"].startswith("https://signed.example/")
+
+    offline = client.get("/api/records/offline/audio")
+    assert offline.status_code == 404

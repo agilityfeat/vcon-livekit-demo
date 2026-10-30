@@ -127,6 +127,127 @@ function findAnalysisByType(vcon, type) {
   return null;
 }
 
+/* ---------- XSS-safe text / markdown rendering ---------- */
+
+/**
+ * Escape the five HTML-significant characters so untrusted record/model text
+ * can never inject tags, attributes, or scripts when assigned via innerHTML.
+ *
+ * This is the FIRST step for every innerHTML path in the viewer: escape the raw
+ * text, THEN apply safe structural transforms (markdown, [REDACTED] pills) to
+ * the already-escaped string. Raw text is never handed to innerHTML directly.
+ */
+function escapeHtml(text) {
+  return String(text == null ? '' : text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Wrap every literal ``[REDACTED]`` token in a highlight pill so an analyst
+ * instantly SEES what the de-identification removed.
+ *
+ * XSS-safe by construction: the caller passes ALREADY-ESCAPED HTML, and we only
+ * replace the (equally escaped) literal token with a <span> whose text is the
+ * fixed, trusted string '[REDACTED]'. No untrusted text is introduced.
+ */
+function highlightRedactions(escapedHtml) {
+  return String(escapedHtml == null ? '' : escapedHtml).replace(
+    /\[REDACTED\]/g,
+    '<span class="redacted-token">[REDACTED]</span>'
+  );
+}
+
+/**
+ * Render a SMALL, safe subset of markdown to HTML for the Bedrock summary.
+ *
+ * The Bedrock summaries use a limited markdown subset, so rather than pull in a
+ * CDN renderer + sanitizer (and break the no-build ethos) we handle just that
+ * subset inline: headings (#, ##, ###), bold (double-star / double-underscore),
+ * italics (single-star / single-underscore), unordered lists (-, *), ordered
+ * lists (1.), inline code (backticks), and paragraphs / line breaks.
+ *
+ * CRITICAL XSS DISCIPLINE: the source text is HTML-escaped FIRST, then the
+ * markdown transforms run over the ESCAPED text and only ever emit a fixed set
+ * of safe tags. Model output therefore cannot inject markup -- any '<', '>', or
+ * '&' it contained is already neutralized before a single tag is added. The
+ * resulting string is safe to assign to innerHTML. [REDACTED] tokens are also
+ * highlighted so a masked summary reads as masked.
+ */
+function renderMarkdownSafe(markdown) {
+  var escaped = escapeHtml(markdown);
+  var lines = escaped.split(/\r?\n/);
+  var html = [];
+  var listType = null; // 'ul' | 'ol' | null
+
+  function closeList() {
+    if (listType) {
+      html.push('</' + listType + '>');
+      listType = null;
+    }
+  }
+
+  function inline(text) {
+    // Inline code first so emphasis markers inside backticks are left alone.
+    text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+    // Bold before italics so '**x**' is not eaten by the single-char rules.
+    text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    text = text.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+    text = text.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    text = text.replace(/_([^_]+)_/g, '<em>$1</em>');
+    // Highlight redaction tokens after emphasis so the pill wraps cleanly.
+    return highlightRedactions(text);
+  }
+
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    var trimmed = line.trim();
+
+    if (trimmed === '') {
+      closeList();
+      continue;
+    }
+
+    var heading = /^(#{1,3})\s+(.*)$/.exec(trimmed);
+    if (heading) {
+      closeList();
+      var level = heading[1].length;
+      html.push('<h' + level + '>' + inline(heading[2]) + '</h' + level + '>');
+      continue;
+    }
+
+    var ordered = /^\d+\.\s+(.*)$/.exec(trimmed);
+    if (ordered) {
+      if (listType !== 'ol') {
+        closeList();
+        html.push('<ol>');
+        listType = 'ol';
+      }
+      html.push('<li>' + inline(ordered[1]) + '</li>');
+      continue;
+    }
+
+    var unordered = /^[-*]\s+(.*)$/.exec(trimmed);
+    if (unordered) {
+      if (listType !== 'ul') {
+        closeList();
+        html.push('<ul>');
+        listType = 'ul';
+      }
+      html.push('<li>' + inline(unordered[1]) + '</li>');
+      continue;
+    }
+
+    closeList();
+    html.push('<p>' + inline(trimmed) + '</p>');
+  }
+  closeList();
+  return html.join('');
+}
+
 // Export pure helpers for unit checks under Node (no effect in the browser).
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
@@ -137,6 +258,9 @@ if (typeof module !== 'undefined' && module.exports) {
     isSameVconLink: isSameVconLink,
     findRecordingDialog: findRecordingDialog,
     findEntitiesAnalysisIndex: findEntitiesAnalysisIndex,
-    findAnalysisByType: findAnalysisByType
+    findAnalysisByType: findAnalysisByType,
+    escapeHtml: escapeHtml,
+    highlightRedactions: highlightRedactions,
+    renderMarkdownSafe: renderMarkdownSafe
   };
 }
