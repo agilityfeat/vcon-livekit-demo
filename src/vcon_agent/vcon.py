@@ -249,12 +249,35 @@ class VConBuilder:
         party_index: int,
         text: str,
         start: Optional[str] = None,
+        start_offset: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Append a dialog turn referencing a party by index.
 
         The dialog object references ``party_index`` (0 or 1), never an embedded
-        identity, so provenance can hang off the party index later. ``start``
-        defaults to the current UTC time.
+        identity, so provenance can hang off the party index later.
+
+        Field layout for ``start`` (deliberate design decision):
+
+        Downstream reconciliation (``enrichment.map_turns_by_timestamp_overlap``
+        / ``_as_float`` and their mirrors in ``infrastructure/template.yaml``)
+        reads the turn's ``start`` field and needs it NUMERIC (float seconds from
+        call start) to time-overlap Transcribe Medical segments against the live
+        dialog turns. An ISO wall-clock string coerces to ``None`` there, so the
+        turn is skipped and speaker->party reconciliation never resolves. To make
+        reconciliation work without breaking the human-readable value, when a
+        numeric ``start_offset`` (seconds since the call started) is supplied we
+        store THAT as the turn's ``start`` and move the ISO wall-clock to a
+        separate ``start_iso`` field. We repurpose ``start`` (rather than adding a
+        third field) because every reader of ``start`` already tolerates a numeric
+        value: the overlap mapper/``_as_float`` WANT numeric; the frontend
+        (``shape_record_for_frontend`` + ``record.js::fmtTime``) coerces/handles a
+        numeric ``start`` fine. Keeping the field name ``start`` means the
+        ``template.yaml`` inline Lambda bodies need no change.
+
+        Backward compatibility: when ``start_offset`` is ``None`` (the existing
+        callers / tests), behavior is unchanged -- ``start`` defaults to the
+        current UTC ISO string (or an explicit ``start`` if passed) and no
+        ``start_iso`` field is added.
 
         Consent must be recorded first (ordering requirement): calling this
         before :meth:`add_consent` raises ``RuntimeError``.
@@ -268,15 +291,23 @@ class VConBuilder:
                 f"party_index must be {PATIENT_INDEX} (patient) or "
                 f"{AGENT_INDEX} (agent), got {party_index!r}"
             )
-        if start is None:
-            start = _utc_now_iso()
+        # ISO wall-clock for the turn: an explicit ``start`` wins, else "now".
+        start_iso = start if start is not None else _utc_now_iso()
         entry: Dict[str, Any] = {
             "type": "text",
             "party": party_index,
             "body": text,
-            "start": start,
             "mimetype": "text/plain",
         }
+        if start_offset is not None:
+            # Numeric timeline: ``start`` carries the float offset (seconds from
+            # call start) that reconciliation aligns on; the human-readable ISO
+            # moves to ``start_iso`` so nothing human-facing is dropped.
+            entry["start"] = float(start_offset)
+            entry["start_iso"] = start_iso
+        else:
+            # Back-compat: ``start`` stays the ISO wall-clock as before.
+            entry["start"] = start_iso
         self._doc["dialog"].append(entry)
         return entry
 
@@ -285,14 +316,17 @@ class VConBuilder:
         role: str,
         text: str,
         start: Optional[str] = None,
+        start_offset: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Convenience wrapper: append a dialog turn given a role string.
 
         Translates ``role`` ('user'/'patient'/'assistant'/'agent') to a party
         index via :func:`role_to_index`, then delegates to
-        :meth:`add_dialog_turn`.
+        :meth:`add_dialog_turn` (threading the optional numeric ``start_offset``).
         """
-        return self.add_dialog_turn(role_to_index(role), text, start=start)
+        return self.add_dialog_turn(
+            role_to_index(role), text, start=start, start_offset=start_offset
+        )
 
     def add_recording_dialog(
         self,

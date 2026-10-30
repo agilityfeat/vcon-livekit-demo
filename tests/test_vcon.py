@@ -138,6 +138,112 @@ def test_add_dialog_turn_by_role():
     assert [d["party"] for d in dialog] == [0, 1]
 
 
+# ----------------------------------------------------------------------------
+# Numeric per-turn offset: a dialog turn created with a numeric start_offset
+# gets a NUMERIC ``start`` (seconds from call start) so the authoritative-
+# transcript speaker->party reconciliation can time-overlap against it. The ISO
+# wall-clock moves to ``start_iso``. Default (no offset) is unchanged.
+# ----------------------------------------------------------------------------
+
+
+def test_add_dialog_turn_numeric_offset_sets_numeric_start_and_iso():
+    from vcon_agent.enrichment import _as_float
+
+    builder = VConBuilder()
+    builder.add_consent(granted=True)
+    entry = builder.add_dialog_turn(PATIENT_INDEX, "I have a headache.", start_offset=4.0)
+
+    # ``start`` is the numeric offset (float seconds) and enrichment accepts it.
+    assert entry["start"] == 4.0
+    assert isinstance(entry["start"], float)
+    assert _as_float(entry["start"]) == 4.0
+    # Human-readable ISO wall-clock is preserved under start_iso, not dropped.
+    assert "start_iso" in entry
+    assert entry["start_iso"]  # non-empty ISO string
+    # start_iso is NOT numeric (it is the ISO instant), so it stays human-facing.
+    assert _as_float(entry["start_iso"]) is None
+
+
+def test_add_dialog_turn_zero_offset_is_numeric_not_dropped():
+    # Offset 0.0 (first turn at call start) must still produce a numeric start,
+    # not fall back to ISO -- a naive truthiness check would mis-handle 0.0.
+    from vcon_agent.enrichment import _as_float
+
+    builder = VConBuilder()
+    builder.add_consent(granted=True)
+    entry = builder.add_dialog_turn(AGENT_INDEX, "What brings you in?", start_offset=0.0)
+    assert entry["start"] == 0.0
+    assert _as_float(entry["start"]) == 0.0
+    assert "start_iso" in entry
+
+
+def test_add_dialog_turn_default_start_is_iso_back_compat():
+    # No offset -> unchanged behavior: ``start`` is the ISO wall-clock (which
+    # enrichment skips as non-numeric), and there is no start_iso field.
+    from vcon_agent.enrichment import _as_float
+
+    builder = VConBuilder()
+    builder.add_consent(granted=True)
+    entry = builder.add_dialog_turn(PATIENT_INDEX, "I have a headache.")
+    assert isinstance(entry["start"], str)
+    assert _as_float(entry["start"]) is None  # ISO -> not numeric
+    assert "start_iso" not in entry
+
+
+def test_add_dialog_turn_by_role_threads_numeric_offset():
+    builder = VConBuilder()
+    builder.add_consent(granted=True)
+    entry = builder.add_dialog_turn_by_role("user", "hello", start_offset=2.5)
+    assert entry["party"] == PATIENT_INDEX
+    assert entry["start"] == 2.5
+    assert entry["start_iso"]
+
+
+def test_reconciliation_resolves_parties_for_numeric_start_turns():
+    # The whole point: with NUMERIC per-turn starts, the speaker->party
+    # reconciliation time-overlaps Transcribe segments against the live dialog
+    # turns and resolves spk_N to Patient/Agent instead of leaving party=None.
+    from vcon_agent.enrichment import reconcile_segments_to_parties
+
+    builder = VConBuilder()
+    builder.add_consent(granted=True)
+    # Agent speaks first at t=0, patient answers at t=4 (numeric offsets).
+    builder.add_dialog_turn(AGENT_INDEX, "What brings you in today?", start_offset=0.0)
+    builder.add_dialog_turn(PATIENT_INDEX, "I've had a headache.", start_offset=4.0)
+    dialog_turns = builder.to_dict()["dialog"]
+
+    # Transcribe Medical segments (numeric seconds) overlapping each turn.
+    segments = [
+        {"speaker": "spk_0", "start": 0.0, "end": 3.0, "text": "What brings you in today?"},
+        {"speaker": "spk_1", "start": 4.0, "end": 6.0, "text": "I've had a headache."},
+    ]
+    turns = reconcile_segments_to_parties(segments, dialog_turns)
+    by_speaker = {t["speaker"]: t["party"] for t in turns}
+    # spk_0 overlaps the agent turn -> party 1; spk_1 overlaps patient -> party 0.
+    assert by_speaker["spk_0"] == AGENT_INDEX
+    assert by_speaker["spk_1"] == PATIENT_INDEX
+
+
+def test_reconciliation_falls_back_to_none_for_iso_start_turns():
+    # Back-compat guard: with the ISO-string default start (no numeric offset),
+    # reconciliation cannot align by time and leaves party=None (the documented
+    # fallback), confirming the numeric offset is what enables resolution.
+    from vcon_agent.enrichment import reconcile_segments_to_parties
+
+    builder = VConBuilder()
+    builder.add_consent(granted=True)
+    builder.add_dialog_turn(AGENT_INDEX, "What brings you in today?")
+    builder.add_dialog_turn(PATIENT_INDEX, "I've had a headache.")
+    dialog_turns = builder.to_dict()["dialog"]
+
+    segments = [
+        {"speaker": "spk_0", "start": 0.0, "end": 3.0, "text": "What brings you in today?"},
+        {"speaker": "spk_1", "start": 4.0, "end": 6.0, "text": "I've had a headache."},
+    ]
+    turns = reconcile_segments_to_parties(segments, dialog_turns)
+    assert all(t["party"] is None for t in turns)
+
+
 def test_run_key_layout_exact():
     key = run_key("room-abc", "2024-01-01T00:00:00+00:00")
     assert key == "room-abc/2024-01-01T00:00:00+00:00/vcon-skeleton.json"

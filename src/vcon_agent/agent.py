@@ -85,7 +85,12 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def handle_item(builder: VConBuilder, role: str, text: str) -> bool:
+def handle_item(
+    builder: VConBuilder,
+    role: str,
+    text: str,
+    start_offset: Optional[float] = None,
+) -> bool:
     """Translate one committed conversation item into a vCon dialog turn.
 
     This is the pure glue between LiveKit's ``conversation_item_added`` event and
@@ -97,6 +102,16 @@ def handle_item(builder: VConBuilder, role: str, text: str) -> bool:
     ``assistant`` -> 1 agent) and the turn is appended in order. Non-dialog roles
     (``system``/``developer``) and empty/whitespace-only text are skipped.
 
+    ``start_offset`` (optional) is the numeric per-turn offset in seconds from the
+    call start. When provided it is threaded into
+    :meth:`~vcon_agent.vcon.VConBuilder.add_dialog_turn` so the turn gets a NUMERIC
+    ``start`` (the ISO wall-clock moves to ``start_iso``), which lets the
+    authoritative-transcript speaker->party reconciliation time-overlap Transcribe
+    segments against this turn. It is passed in already-computed so this helper
+    stays pure and deterministic (no real clock here); the actual ``now - session
+    start`` math is done at the call site in :func:`entrypoint`. When ``None``,
+    behavior is unchanged (ISO ``start``, back-compat).
+
     Returns ``True`` if a dialog turn was appended, ``False`` if the item was
     skipped.
     """
@@ -107,8 +122,27 @@ def handle_item(builder: VConBuilder, role: str, text: str) -> bool:
         return False
     if text is None or not text.strip():
         return False
-    builder.add_dialog_turn(role_to_index(normalized), text)
+    builder.add_dialog_turn(
+        role_to_index(normalized), text, start_offset=start_offset
+    )
     return True
+
+
+def _offset_seconds_from(session_start_iso: str, now_iso: str) -> Optional[float]:
+    """Return ``now_iso - session_start_iso`` in seconds, or ``None`` on failure.
+
+    Both arguments are ISO 8601 instants (as produced by :func:`_utc_now_iso`).
+    This is the pure numeric-offset computation done at the call site so the clock
+    reading/parsing stays out of the unit-tested :func:`handle_item`. Any parse
+    error returns ``None`` so the caller falls back to the ISO-only turn rather
+    than breaking the call.
+    """
+    try:
+        start = datetime.fromisoformat(session_start_iso)
+        now = datetime.fromisoformat(now_iso)
+        return (now - start).total_seconds()
+    except (TypeError, ValueError):
+        return None
 
 
 def build_egress_request(
@@ -343,8 +377,14 @@ async def entrypoint(ctx: JobContext) -> None:
         item = event.item
         role = getattr(item, "role", None)
         text = getattr(item, "text_content", None)
+        # Numeric per-turn offset (seconds from call start): compute it HERE (at
+        # the call site, where the real clock lives and ``session_start_iso`` is
+        # in scope) and pass the float into the pure helper so handle_item stays
+        # deterministic/testable. Defensive: a parse failure yields None, which
+        # falls back to today's ISO-only turn rather than breaking the call.
+        start_offset = _offset_seconds_from(session_start_iso, _utc_now_iso())
         try:
-            handle_item(builder, role, text)
+            handle_item(builder, role, text, start_offset=start_offset)
         except Exception:  # pragma: no cover - defensive; never break the call
             logger.exception("failed to record dialog turn (role=%r)", role)
 
