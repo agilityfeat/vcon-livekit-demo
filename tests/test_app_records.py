@@ -215,6 +215,60 @@ def test_decode_full_record_fails_on_tampered_ciphertext(keypair):
 
 
 # ---------------------------------------------------------------------------
+# Key-mismatch mapping: wrong key -> typed RecordKeyMismatchError (not raw JOSE).
+# ---------------------------------------------------------------------------
+
+
+def test_decode_full_record_wrong_key_raises_typed_error(keypair):
+    """A full-record decrypt with the WRONG key must surface as the typed
+    RecordKeyMismatchError, not the raw jwcrypto exception. Fails if the
+    mapping is reverted and the JOSE exception leaks through."""
+    _full_doc, _signed, full_jwe, _red_jws, _red_doc = _seal_artifacts(keypair)
+    wrong_key = generate_demo_keypair(size=2048)
+
+    with pytest.raises(rec.RecordKeyMismatchError):
+        rec.decode_full_record(full_jwe, wrong_key)
+
+
+def test_decode_redacted_record_wrong_key_raises_typed_error(keypair):
+    """A redacted-record verify with the WRONG key must surface as the typed
+    RecordKeyMismatchError."""
+    _full_doc, _signed, _full_jwe, redacted_jws, _red_doc = _seal_artifacts(keypair)
+    wrong_key = generate_demo_keypair(size=2048)
+
+    with pytest.raises(rec.RecordKeyMismatchError):
+        rec.decode_redacted_record(redacted_jws, wrong_key)
+
+
+def test_key_mismatch_message_is_actionable_without_stack_trace(keypair):
+    """The mapped error carries a user-actionable message that names the shared
+    env var and preserves the original JOSE error as the cause (not in the
+    message text)."""
+    _full_doc, _signed, _full_jwe, redacted_jws, _red_doc = _seal_artifacts(keypair)
+    wrong_key = generate_demo_keypair(size=2048)
+
+    with pytest.raises(rec.RecordKeyMismatchError) as excinfo:
+        rec.decode_redacted_record(redacted_jws, wrong_key)
+
+    message = str(excinfo.value)
+    assert "VCON_SIGNING_PRIVATE_JWK" in message
+    assert "Traceback" not in message
+    # The original JOSE failure is preserved as the cause.
+    assert excinfo.value.__cause__ is not None
+
+
+def test_decode_full_record_wrong_key_via_store_raises_typed_error(keypair):
+    """The S3 load path (load_full_record) also surfaces the typed error so the
+    route layer can map it to 409."""
+    s3, _full_doc, _full_jwe, _redacted_doc = _fake_s3_with_artifacts(keypair)
+    descriptor = rec._descriptor_for_prefix(RUN_PREFIX)
+    wrong_key = generate_demo_keypair(size=2048)
+
+    with pytest.raises(rec.RecordKeyMismatchError):
+        rec.load_full_record(s3, wrong_key, BUCKET, descriptor.full_key)
+
+
+# ---------------------------------------------------------------------------
 # load_redacted_record: verify + carries the real redacted pointer.
 # ---------------------------------------------------------------------------
 
@@ -353,3 +407,58 @@ def test_shape_record_leaves_non_numeric_start_untouched():
     doc = {"dialog": [{"type": "text", "party": 0, "body": "x", "start": "2024-01-01T00:00:00+00:00"}]}
     shaped = rec.shape_record_for_frontend(doc)
     assert shaped["dialog"][0]["start"] == "2024-01-01T00:00:00+00:00"
+
+
+# ---------------------------------------------------------------------------
+# Route-level mapping: key mismatch -> 409, missing record -> 404 (fastapi).
+# ---------------------------------------------------------------------------
+
+
+class _RaisingStore:
+    """A minimal RecordsStore stand-in whose full/redacted lookups raise.
+
+    ``run_prefix`` 'mismatch' -> RecordKeyMismatchError (expected 409),
+    anything else -> FileNotFoundError (expected 404). list_records is empty.
+    """
+
+    def list_records(self):
+        return []
+
+    def full_record(self, run_prefix):
+        return self._raise(run_prefix)
+
+    def redacted_record(self, run_prefix):
+        return self._raise(run_prefix)
+
+    @staticmethod
+    def _raise(run_prefix):
+        if run_prefix == "mismatch":
+            raise rec.RecordKeyMismatchError(
+                "This record was sealed with a different signing key. Ensure the "
+                "seal Lambda and the backend share the same "
+                "VCON_SIGNING_PRIVATE_JWK, then place a new call."
+            )
+        raise FileNotFoundError("no such record: {}".format(run_prefix))
+
+
+def test_route_maps_key_mismatch_to_409_and_missing_to_404():
+    """A key mismatch must yield HTTP 409 (not a raw 500), while a missing
+    record still yields 404. Guarded so it skips cleanly without fastapi."""
+    pytest.importorskip("fastapi", reason="fastapi not installed; route test skipped")
+    from fastapi.testclient import TestClient
+
+    from vcon_agent.app.main import create_app
+
+    app = create_app(env={}, store=_RaisingStore())
+    client = TestClient(app)
+
+    # Full view.
+    assert client.get("/api/records/mismatch/full").status_code == 409
+    assert client.get("/api/records/other/full").status_code == 404
+    # Redacted view.
+    assert client.get("/api/records/mismatch/redacted").status_code == 409
+    assert client.get("/api/records/other/redacted").status_code == 404
+
+    # The 409 body carries the actionable message, not a stack trace.
+    body = client.get("/api/records/mismatch/full").json()
+    assert "VCON_SIGNING_PRIVATE_JWK" in body["detail"]

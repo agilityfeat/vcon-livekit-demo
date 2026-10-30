@@ -26,6 +26,7 @@ The returned dict shape is identical to the previous inline body:
 """
 
 import json
+import logging
 import os
 
 import boto3
@@ -42,6 +43,8 @@ from sealing import (
     VCON_JWS_CONTENT_TYPE,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _load_or_generate_key():
     """Load the demo signing key from the env var, or generate one in-memory.
@@ -57,6 +60,13 @@ def _load_or_generate_key():
     key = load_jwk_from_env("VCON_SIGNING_PRIVATE_JWK")
     if key is not None:
         return key
+    logger.warning(
+        "VCON_SIGNING_PRIVATE_JWK not set: generating an EPHEMERAL in-memory "
+        "signing key; records sealed this run CANNOT be decrypted or verified "
+        "by the backend - set the same VCON_SIGNING_PRIVATE_JWK on this Lambda "
+        "(CloudFormation parameter VconSigningPrivateJwk) and in the backend "
+        ".env."
+    )
     return generate_demo_keypair(size=2048)
 
 

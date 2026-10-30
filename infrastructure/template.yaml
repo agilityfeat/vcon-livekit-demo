@@ -87,6 +87,17 @@ Parameters:
       Override at deploy time with --parameter-overrides to pin a different
       model or a geo profile (e.g. us.anthropic.claude-haiku-5-5).
 
+  VconSigningPrivateJwk:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: >-
+      Shared JWS/JWE demo signing key for the Seal step: a JWK JSON document or
+      a PEM string. It MUST match the backend's .env VCON_SIGNING_PRIVATE_JWK so
+      the backend can decrypt/verify the records the Seal step produces. Leaving
+      it empty makes the Seal step generate an ephemeral per-invocation key
+      whose sealed records can never be decrypted or verified by the backend.
+
 Resources:
 
   # ---------------------------------------------------------------------------
@@ -1016,12 +1027,14 @@ Resources:
         Variables:
           BUCKET_NAME: !Ref RecordingsBucket
           # 🩹 Shortcut: self-signed demo keypair carried in a Lambda env var
-          # (env/local), not a managed key. Left EMPTY here so a demo key is
-          # generated at runtime; a demo deploy may set it to a JWK/PEM string.
-          # → Production: AWS KMS / ACM PCA, key rotation, HSM-backed signing;
-          # never ship keys with the app. (Ties to the AWS-plugin
-          # long-term-credential caveat - #1719.)
-          VCON_SIGNING_PRIVATE_JWK: ''
+          # (env/local), not a managed key. Set from the VconSigningPrivateJwk
+          # CloudFormation parameter; it MUST match the backend's .env
+          # VCON_SIGNING_PRIVATE_JWK or the backend cannot decrypt/verify the
+          # sealed records. Leaving the parameter empty makes the Seal step
+          # generate an ephemeral per-invocation key whose records can never be
+          # read back. → Production: AWS KMS / ACM PCA, key rotation, HSM-backed
+          # signing; never ship keys with the app.
+          VCON_SIGNING_PRIVATE_JWK: !Ref VconSigningPrivateJwk
       Tags:
         Project: !Ref ProjectName
         Environment: !Ref Environment

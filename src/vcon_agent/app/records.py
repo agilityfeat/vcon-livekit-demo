@@ -67,6 +67,23 @@ SIGNED_OBJECT = "vcon-signed.jws"
 FULL_OBJECT = "vcon-full.jwe"
 REDACTED_OBJECT = "vcon-redacted.jws"
 
+
+# ---------------------------------------------------------------------------
+# Typed errors.
+# ---------------------------------------------------------------------------
+
+
+class RecordKeyMismatchError(Exception):
+    """A sealed artifact could not be decrypted/verified with the configured key.
+
+    Raised when the server-side JOSE decrypt/verify of a sealed record fails,
+    which in practice means the seal Lambda and the backend are NOT sharing the
+    same ``VCON_SIGNING_PRIVATE_JWK`` (a shared-key mismatch), or the ciphertext
+    was tampered with. The route layer maps this to a friendly HTTP 409 instead
+    of leaking a raw 500 + JOSE stack trace. This is framework-free and carries
+    no third-party imports so records.py stays collectable offline.
+    """
+
 # Default local directory used by the offline fixtures fallback when
 # BUCKET_NAME is unset. The full + redacted sample pair (produced by FEAT-003
 # by running the real sealing core) lands here; the fallback guards gracefully
@@ -255,9 +272,18 @@ def decode_full_record(full_jwe: str, private_key) -> Dict[str, Any]:
     public half to return the full readable vCon dict. A wrong key or tampered
     ciphertext raises (loudly), so a bad artifact never silently yields a
     partial document. No JOSE is reimplemented here.
+
+    A JOSE decrypt/verify failure (wrong shared key or tampered ciphertext) is
+    re-raised as :class:`RecordKeyMismatchError` with a user-actionable message
+    so the route layer can return a friendly 409 instead of a raw 500. The
+    jwcrypto exception types are imported LAZILY here so records.py stays free
+    of any module-top jwcrypto import.
     """
-    signed_jws = sealing.decrypt_vcon(full_jwe, private_key)
-    return sealing.verify_vcon(signed_jws, sealing.public_jwk(private_key))
+    try:
+        signed_jws = sealing.decrypt_vcon(full_jwe, private_key)
+        return sealing.verify_vcon(signed_jws, sealing.public_jwk(private_key))
+    except Exception as exc:  # noqa: BLE001 (narrowed to JOSE below)
+        _raise_key_mismatch(exc)
 
 
 def decode_redacted_record(redacted_jws: str, key) -> Dict[str, Any]:
@@ -266,10 +292,44 @@ def decode_redacted_record(redacted_jws: str, key) -> Dict[str, Any]:
     Reuses ``sealing.verify_vcon`` to return the readable redacted vCon dict,
     which carries the real top-level ``redacted`` pointer back to the full copy.
     ``key`` may be the private JWK (its public half is used) or a public JWK.
-    A wrong key / tampered payload raises.
+    A wrong key / tampered payload is re-raised as
+    :class:`RecordKeyMismatchError` (the jwcrypto exception types are imported
+    lazily; see :func:`decode_full_record`).
     """
     public = _as_public(key)
-    return sealing.verify_vcon(redacted_jws, public)
+    try:
+        return sealing.verify_vcon(redacted_jws, public)
+    except Exception as exc:  # noqa: BLE001 (narrowed to JOSE below)
+        _raise_key_mismatch(exc)
+
+
+def _raise_key_mismatch(exc: Exception) -> None:
+    """Map a JOSE decrypt/verify failure to :class:`RecordKeyMismatchError`.
+
+    The specific jwcrypto exception types are imported LAZILY here so no
+    jwcrypto import happens at module import time (records.py must stay
+    collectable offline where jwcrypto may be absent). Non-JOSE failures are
+    re-raised unchanged so unexpected bugs are not masked as a key mismatch.
+
+    Raises :class:`RecordKeyMismatchError` with a user-actionable message and
+    preserves the original as ``__cause__`` (never leaking the raw stack trace
+    into the message text).
+    """
+    try:
+        from jwcrypto.common import InvalidJWEData
+        from jwcrypto.jws import InvalidJWSSignature
+
+        jose_errors: tuple = (InvalidJWEData, InvalidJWSSignature)
+    except Exception:  # noqa: BLE001 (jwcrypto absent -> treat any as mismatch)
+        jose_errors = (Exception,)
+
+    if not isinstance(exc, jose_errors):
+        raise exc
+    raise RecordKeyMismatchError(
+        "This record was sealed with a different signing key. Ensure the seal "
+        "Lambda and the backend share the same VCON_SIGNING_PRIVATE_JWK, then "
+        "place a new call."
+    ) from exc
 
 
 def _as_public(key):

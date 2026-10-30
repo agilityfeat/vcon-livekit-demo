@@ -114,6 +114,8 @@ def create_app(
             doc = store.full_record(run_prefix)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except records_mod.RecordKeyMismatchError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return records_mod.shape_record_for_frontend(doc)
 
     @app.get("/api/records/{run_prefix:path}/redacted")
@@ -123,6 +125,8 @@ def create_app(
             doc = store.redacted_record(run_prefix)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except records_mod.RecordKeyMismatchError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return records_mod.shape_record_for_frontend(doc)
 
     # Serve the static frontend from the same process. Guarded so the app still

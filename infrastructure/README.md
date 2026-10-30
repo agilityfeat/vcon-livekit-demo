@@ -185,12 +185,24 @@ Optional parameter overrides:
 sam deploy \
   --stack-name vcon-livekit-demo \
   --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides ProjectName=vcon-livekit-demo Environment=dev BedrockModelId=global.anthropic.claude-haiku-5-5
+  --parameter-overrides ProjectName=vcon-livekit-demo Environment=dev BedrockModelId=global.anthropic.claude-haiku-5-5 VconSigningPrivateJwk='<jwk-or-pem>'
 ```
 
 `BedrockModelId` must be a Bedrock inference-profile id (default
 `global.anthropic.claude-haiku-5-5`); override it to pin a different model or a
 geo profile such as `us.anthropic.claude-haiku-5-5`.
+
+`VconSigningPrivateJwk` is the shared JWS/JWE demo signing key the Seal step
+uses to sign and encrypt the vCon artifacts. It MUST match the backend's `.env`
+`VCON_SIGNING_PRIVATE_JWK`, because the backend verifies and decrypts those same
+artifacts with it (only the private key must match; the backend derives the
+public half from it). Leaving it empty (the default) makes the Seal step
+generate an **ephemeral per-invocation key** whose records can never be read
+back by the viewer. Generate a demo keypair with:
+
+```bash
+python -c "from jwcrypto import jwk; print(jwk.JWK.generate(kty='RSA', size=2048).export(private_key=True))"
+```
 
 ### Sealing core
 
@@ -429,10 +441,13 @@ from a clean checkout is:
 sam build --use-container --template infrastructure/template.yaml
 
 # 3. Deploy the stack (first time: --guided; afterwards: the explicit form).
+#    VconSigningPrivateJwk MUST match the backend's .env VCON_SIGNING_PRIVATE_JWK
+#    (see the parameter note above); an empty value makes the Seal step generate
+#    an ephemeral per-invocation key whose records can never be read back.
 sam deploy \
   --stack-name vcon-livekit-demo \
   --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides ProjectName=vcon-livekit-demo Environment=dev BedrockModelId=global.anthropic.claude-haiku-5-5
+  --parameter-overrides ProjectName=vcon-livekit-demo Environment=dev BedrockModelId=global.anthropic.claude-haiku-5-5 VconSigningPrivateJwk='<jwk-or-pem>'
 
 # 4. Read the stack Outputs (BucketName / StateMachineArn / Region) into .env.
 cp .env.example .env     # at the repository root

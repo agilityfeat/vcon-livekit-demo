@@ -256,6 +256,54 @@ def test_merge_to_seal_threads_recording_key_and_writes_artifacts():
     assert sealed["seal_keys"]["redacted_key"].endswith("vcon-redacted.jws")
 
 
+def test_seal_warns_loudly_when_signing_key_unset(caplog):
+    """When VCON_SIGNING_PRIVATE_JWK is unset the seal handler must emit a loud
+    WARNING (so an operator can tell the records are sealed with an ephemeral
+    key that the backend cannot read) and STILL complete the run."""
+    merge = _merge_handler()
+    merged = merge(_branches("room/sess/ts/recording.ogg"), None)
+
+    fake_s3 = _FakeS3()
+    # _seal_handler pops VCON_SIGNING_PRIVATE_JWK from the env.
+    seal = _seal_handler(fake_s3, _FakeCM())
+    with caplog.at_level("WARNING"):
+        sealed = seal(merged, None)
+
+    # The run still completes (warn-and-continue, no hard crash).
+    assert sealed["step"] == "seal"
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any(
+        "VCON_SIGNING_PRIVATE_JWK" in r.getMessage()
+        and "EPHEMERAL" in r.getMessage()
+        for r in warnings
+    ), "expected a loud WARNING naming VCON_SIGNING_PRIVATE_JWK / EPHEMERAL"
+
+
+def test_seal_does_not_warn_when_signing_key_set(caplog):
+    """With the key pinned, the unset-key WARNING must NOT fire."""
+    import sealing
+
+    keypair = sealing.generate_demo_keypair(size=2048)
+    private_jwk_json = keypair.export()
+
+    merge = _merge_handler()
+    merged = merge(_branches("room/sess/ts/recording.ogg"), None)
+    fake_s3 = _FakeS3()
+    try:
+        seal = _seal_handler_with_key(fake_s3, _FakeCM(), private_jwk_json)
+        with caplog.at_level("WARNING"):
+            sealed = seal(merged, None)
+    finally:
+        os.environ.pop("VCON_SIGNING_PRIVATE_JWK", None)
+
+    assert sealed["step"] == "seal"
+    assert not any(
+        "VCON_SIGNING_PRIVATE_JWK" in r.getMessage() and "EPHEMERAL" in r.getMessage()
+        for r in caplog.records
+    )
+
+
 def test_seal_redacted_url_set_independent_of_put():
     """The redacted pointer url must locate the full JWE as soon as the prefix is
     known, even if the PUTs fail (issue 3)."""

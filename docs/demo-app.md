@@ -57,17 +57,54 @@ python -m vcon_agent.agent dev
 Then open the app, click **Start call**, and talk to the bot. Once the pipeline
 finishes, the record shows up on the **Records** page.
 
+#### Prerequisite: share the signing key BEFORE the first call
+
+The Seal Lambda and the backend viewer must use the SAME signing key, or the
+records you produce are permanently unreadable (see
+[Signing key must match (live mode)](#signing-key-must-match-live-mode) below
+for the symptom). Do this ONCE, before you place the first call whose records
+you intend to view:
+
+1. Generate a demo keypair and capture the output:
+
+   ```bash
+   python -c "from jwcrypto import jwk; print(jwk.JWK.generate(kty='RSA', size=2048).export(private_key=True))"
+   ```
+
+2. Deploy / update the Seal Lambda with that key as the CloudFormation
+   parameter `VconSigningPrivateJwk` (see
+   [infrastructure/README.md](../infrastructure/README.md#deploy-aws-sam) for
+   the full deploy flow):
+
+   ```bash
+   sam deploy \
+     --stack-name vcon-livekit-demo \
+     --capabilities CAPABILITY_NAMED_IAM \
+     --parameter-overrides VconSigningPrivateJwk='<the-generated-key>'
+   ```
+
+3. Put the SAME value in the local `.env` as `VCON_SIGNING_PRIVATE_JWK`.
+
+Only the PRIVATE key must match; the backend derives the public half from it.
+If you skip this, the Seal Lambda falls back to a throwaway per-invocation key
+and the records it writes can never be decrypted or verified later.
+
 ### Signing key must match (live mode)
 
 > **Note:** In live mode the backend decrypts `vcon-full.jwe` and verifies the
 > JWS using `VCON_SIGNING_PRIVATE_JWK` from `.env`, while the deployed Seal
-> Lambda seals those S3 artifacts using ITS own `VCON_SIGNING_PRIVATE_JWK` (or,
+> Lambda seals those S3 artifacts using ITS own `VCON_SIGNING_PRIVATE_JWK` (set
+> at deploy time via the CloudFormation parameter `VconSigningPrivateJwk`), or,
 > if that variable is unset in the Lambda, an **ephemeral in-memory keypair**
-> generated per invocation). The two must be the **same key**, or the doctor /
-> full view fails to decrypt with
-> `jwcrypto.common.InvalidJWEData: No recipient matched the provided key`
-> (surfaced as an HTTP 500). Records sealed by an ephemeral (or otherwise
-> mismatched) key can never be decrypted later.
+> generated per invocation. The two must be the **same key**, or the doctor /
+> full view fails to decrypt and the analyst / redacted view fails to verify.
+> On a mismatch the backend now returns a friendly **HTTP 409** with the detail
+> "This record was sealed with a different signing key ..." (instead of a raw
+> HTTP 500), so the cause is legible. Records sealed by an ephemeral (or
+> otherwise mismatched) key can never be read back later.
+>
+> See [Prerequisite: share the signing key BEFORE the first call](#prerequisite-share-the-signing-key-before-the-first-call)
+> for the ordered steps that avoid this up front.
 >
 > Fix: set the **same** `VCON_SIGNING_PRIVATE_JWK` in BOTH the Seal Lambda
 > environment and the local `.env`, then place a NEW call (previously sealed
