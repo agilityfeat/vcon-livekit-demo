@@ -234,6 +234,20 @@ function renderMeta(doc) {
 }
 
 function renderAudio(doc) {
+  // The whole Call audio panel is doctor-view-only. The recording is the
+  // un-redacted audio, so it has no place in the de-identified (analyst)
+  // record: in analyst mode we hide the entire #audio-panel section -- no
+  // heading, no <audio> control, no note -- and return before reading the
+  // recording url or requesting any presigned GET. Doctor mode re-shows the
+  // panel and renders it exactly as below. render() re-runs renderAudio on
+  // every toggle, so flipping back to doctor un-hides the panel here.
+  var panel = $('audio-panel');
+  if (state.mode === 'analyst') {
+    if (panel) panel.hidden = true;
+    return;
+  }
+  if (panel) panel.hidden = false;
+
   audioEl = $('audio');
   var rec = findRecordingDialog(doc);
   var note = $('audio-note');
@@ -253,17 +267,10 @@ function renderAudio(doc) {
   // 🩹 The recording url is an s3:// reference a browser cannot play. In the
   // DOCTOR view we fetch a short-lived presigned GET from /audio and stream
   // THAT; in offline/demo mode the backend has no real object and returns 404,
-  // so we show a clean "not available" note.
-  //
-  // In the ANALYST view we deliberately do NOT request the audio: a presigned
-  // GET for the full recording is the un-redacted audio, so serving it in the
-  // de-identified view would undercut the redaction story. The audio stays
-  // withheld there.
+  // so we show a clean "not available" note. (The analyst view never reaches
+  // here: renderAudio hides the whole panel and returns up top, so no presigned
+  // GET for the un-redacted audio is ever issued from the de-identified view.)
   audioEl.removeAttribute('src');
-  if (state.mode === 'analyst') {
-    note.textContent = 'Audio is withheld from the de-identified view.';
-    return;
-  }
   note.textContent = 'Loading audio…';
   fetchAudioUrl().then(function (url) {
     if (url) {

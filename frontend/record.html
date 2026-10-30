@@ -65,6 +65,11 @@
         <dl id="meta" class="meta-grid"></dl>
       </section>
 
+      <!--
+        Call audio (doctor-view only). The recording is the un-redacted audio,
+        so record.js hides this entire #audio-panel section in the analyst
+        (de-identified) view; it is only rendered/played in the doctor view.
+      -->
       <section class="panel" id="audio-panel">
         <h2>Call audio</h2>
         <audio id="audio" controls preload="none"></audio>
