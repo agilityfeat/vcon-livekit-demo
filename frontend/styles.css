@@ -295,6 +295,33 @@ audio { width: 100%; }
   border-radius: 4px;
 }
 
+/* Clinical transcript (authoritative): the primary, clinical-grade reading
+   surface -- styled prominently with a blue accent so it reads as the source of
+   truth above the demoted live transcript. */
+.clinical-transcript-panel {
+  border-left: 4px solid #1f6feb;
+}
+.clinical-transcript-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin: 0 0 0.5rem;
+}
+.clinical-transcript-badges .badge { margin-left: 0; }
+.clinical-transcript {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Live transcript (demoted): the real-time STT kept for reference, so it is
+   visually subdued -- muted background and heading -- to read as secondary to
+   the authoritative clinical transcript above. */
+.live-transcript-panel {
+  background: #f7f9fc;
+  border-style: dashed;
+}
+.live-transcript-panel > h2 { color: #5a6479; font-weight: 600; }
+
 .analysis-entry { border-top: 1px solid #eceff5; padding: 0.6rem 0; }
 .analysis-entry:first-child { border-top: none; }
 .analysis-type { font-weight: 600; }

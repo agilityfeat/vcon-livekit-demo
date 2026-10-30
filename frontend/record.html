@@ -88,8 +88,29 @@
         <p id="summary-prov" class="provenance"></p>
       </section>
 
-      <section class="panel" id="transcript-panel">
-        <h2>Transcript (speaker-attributed)</h2>
+      <!--
+        Clinical transcript (authoritative): the Transcribe Medical transcript
+        carried as an authoritative analysis[] entry. This is the clinical-grade
+        reading surface, so it leads above the live transcript. It is a single
+        plain-text blob (no per-turn/speaker structure), rendered as a formatted
+        text block rather than speaker-attributed turns.
+      -->
+      <section class="panel clinical-transcript-panel" id="clinical-transcript-panel">
+        <h2>Clinical transcript (authoritative)</h2>
+        <div id="clinical-transcript-badges" class="clinical-transcript-badges"></div>
+        <div id="clinical-transcript" class="clinical-transcript body-text"></div>
+      </section>
+
+      <!--
+        Live transcript (demoted, for reference): the real-time Deepgram STT
+        dialog turns. Kept as speaker-attributed <li data-turn> items because
+        the medication->audio provenance seek targets those turn indices. It is
+        visually secondary because the authoritative transcript above may differ
+        from (and corrects) the live STT.
+      -->
+      <section class="panel live-transcript-panel" id="transcript-panel">
+        <h2>Live transcript (real-time, for reference)</h2>
+        <p class="note">Real-time speech-to-text captured during the call. Kept for reference; it may differ from the authoritative clinical transcript above.</p>
         <ol id="dialog" class="dialog"></ol>
       </section>
 

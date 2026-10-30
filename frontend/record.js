@@ -117,6 +117,7 @@ function render() {
   renderParties(doc);
   renderMeds(doc);
   renderSummary(doc);
+  renderClinicalTranscript(doc);
   renderDialog(doc);
   renderAnalysis(doc);
 }
@@ -415,6 +416,50 @@ function renderSummary(doc) {
     : '';
 }
 
+/**
+ * Render the AUTHORITATIVE clinical transcript (Transcribe Medical) as the
+ * primary transcript the clinician reads. It is a single plain-text blob in the
+ * analysis[] transcript entry -- no per-turn/speaker structure -- so we present
+ * it as a formatted text block (escape first, preserve newlines, then highlight
+ * [REDACTED] so a masked body still shows the pills in the analyst view). The
+ * vendor/authoritative badges mark it as the clinical-grade source. If there is
+ * no authoritative transcript entry we hide the panel and leave the live
+ * transcript below as the only transcript.
+ */
+function renderClinicalTranscript(doc) {
+  var panel = $('clinical-transcript-panel');
+  var badges = $('clinical-transcript-badges');
+  var body = $('clinical-transcript');
+  badges.innerHTML = '';
+  body.innerHTML = '';
+
+  var entry = findAuthoritativeTranscript(doc);
+  if (!entry || entry.body == null || String(entry.body) === '') {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+
+  if (entry.vendor) {
+    var vendor = document.createElement('span');
+    vendor.className = 'badge';
+    vendor.textContent = entry.vendor;
+    badges.appendChild(vendor);
+  }
+  if (entry.authoritative) {
+    var auth = document.createElement('span');
+    auth.className = 'badge authoritative';
+    auth.textContent = 'authoritative';
+    badges.appendChild(auth);
+  }
+
+  // The transcript is plain text, not markdown: escape it, keep its line breaks
+  // (CSS white-space: pre-wrap preserves them), then highlight [REDACTED] so a
+  // masked transcript reads as masked in the analyst view. XSS-safe: only the
+  // escaped fixed token is wrapped.
+  body.innerHTML = highlightRedactions(escapeHtml(String(entry.body)));
+}
+
 function renderDialog(doc) {
   var ol = $('dialog');
   ol.innerHTML = '';
@@ -466,7 +511,14 @@ function renderAnalysis(doc) {
     wrap.textContent = '(no analysis)';
     return;
   }
+  // The authoritative transcript now has its own prominent panel above, so skip
+  // it here to avoid showing the same transcript blob twice. Entities, summary,
+  // and any other analysis entries still render in this technical view.
+  var authoritativeTranscript = findAuthoritativeTranscript(doc);
+  var shown = 0;
   analysis.forEach(function (entry) {
+    if (entry === authoritativeTranscript) return;
+    shown++;
     var div = document.createElement('div');
     div.className = 'analysis-entry';
 
@@ -517,6 +569,12 @@ function renderAnalysis(doc) {
 
     wrap.appendChild(div);
   });
+
+  // If the authoritative transcript was the only analysis entry, the generic
+  // section would otherwise render empty -- note that it moved to its panel.
+  if (shown === 0) {
+    wrap.textContent = '(no further analysis entries)';
+  }
 }
 
 /* ---------- init ---------- */

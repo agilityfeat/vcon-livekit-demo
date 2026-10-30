@@ -127,6 +127,31 @@ function findAnalysisByType(vcon, type) {
   return null;
 }
 
+/**
+ * Find the AUTHORITATIVE transcript analysis entry (or null).
+ *
+ * The pipeline emits more than one transcript-like surface: the LIVE dialog
+ * turns (Deepgram STT, kept as dialog[] text turns) and the clinical-grade
+ * Transcribe Medical transcript (an analysis entry of type 'transcript' with
+ * `authoritative` set and a single plain-text `body` blob -- it does NOT carry
+ * per-turn/speaker structure). The record view foregrounds that authoritative
+ * transcript, so we pick the transcript entry whose `authoritative` is truthy.
+ * If several transcript entries exist and none is marked authoritative, falls
+ * back to the first transcript entry so callers still have something to show.
+ */
+function findAuthoritativeTranscript(vcon) {
+  var analysis = (vcon && vcon.analysis) || [];
+  var firstTranscript = null;
+  for (var i = 0; i < analysis.length; i++) {
+    var entry = analysis[i];
+    if (entry && entry.type === 'transcript') {
+      if (entry.authoritative) return entry;
+      if (!firstTranscript) firstTranscript = entry;
+    }
+  }
+  return firstTranscript;
+}
+
 /* ---------- XSS-safe text / markdown rendering ---------- */
 
 /**
@@ -259,6 +284,7 @@ if (typeof module !== 'undefined' && module.exports) {
     findRecordingDialog: findRecordingDialog,
     findEntitiesAnalysisIndex: findEntitiesAnalysisIndex,
     findAnalysisByType: findAnalysisByType,
+    findAuthoritativeTranscript: findAuthoritativeTranscript,
     escapeHtml: escapeHtml,
     highlightRedactions: highlightRedactions,
     renderMarkdownSafe: renderMarkdownSafe
