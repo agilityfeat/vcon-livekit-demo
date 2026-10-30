@@ -42,36 +42,6 @@ function speakerLabelForPartyIndex(vcon, partyIndex) {
 }
 
 /**
- * Resolve an `entities` analysis entry to the audio seek time in seconds.
- *
- * Provenance chain: entities entry -> its `dialog` turn index -> that dialog
- * turn's numeric `start`. Returns null if anything is missing or non-numeric so
- * callers can decide not to seek.
- */
-function resolveEntityStartSeconds(vcon, entitiesEntryIndex) {
-  var analysis = (vcon && vcon.analysis) || [];
-  var entry = analysis[entitiesEntryIndex];
-  if (!entry || !Array.isArray(entry.dialog) || entry.dialog.length === 0) {
-    return null;
-  }
-  var turnIndex = entry.dialog[0];
-  var dialog = (vcon && vcon.dialog) || [];
-  var turn = dialog[turnIndex];
-  if (!turn || typeof turn.start !== 'number' || !isFinite(turn.start)) {
-    return null;
-  }
-  return turn.start;
-}
-
-/** The first dialog turn index an analysis entry pins to (or null). */
-function firstDialogTurnIndex(entry) {
-  if (entry && Array.isArray(entry.dialog) && entry.dialog.length > 0) {
-    return entry.dialog[0];
-  }
-  return null;
-}
-
-/**
  * Decide whether a full doc and a redacted doc are the SAME vCon.
  *
  * REAL model (the inverse of the stale standalone viewer): only the REDACTED
@@ -278,8 +248,6 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     VCON_JWS_CONTENT_TYPE: VCON_JWS_CONTENT_TYPE,
     speakerLabelForPartyIndex: speakerLabelForPartyIndex,
-    resolveEntityStartSeconds: resolveEntityStartSeconds,
-    firstDialogTurnIndex: firstDialogTurnIndex,
     isSameVconLink: isSameVconLink,
     findRecordingDialog: findRecordingDialog,
     findEntitiesAnalysisIndex: findEntitiesAnalysisIndex,

@@ -5,12 +5,12 @@
  *   doctor  -> GET /api/records/{run}/full
  *   analyst -> GET /api/records/{run}/redacted
  * then renders it with the salvaged viewer logic. The pure helpers
- * (speakerLabelForPartyIndex, resolveEntityStartSeconds, isSameVconLink, ...)
- * live in vcon-helpers.js and are exposed as globals by that classic script.
+ * (speakerLabelForPartyIndex, isSameVconLink, ...) live in vcon-helpers.js and
+ * are exposed as globals by that classic script.
  *
  * This page NEVER touches JOSE: the server did all verify/decrypt, so here we
- * only shape DOM from plain JSON. The medication->audio provenance seek and the
- * corrected full<->redacted linkage banner are the two headline behaviors.
+ * only shape DOM from plain JSON. The corrected full<->redacted linkage banner
+ * is the headline behavior.
  */
 
 'use strict';
@@ -36,7 +36,7 @@ var state = {
   mode: 'doctor'    // 'doctor' | 'analyst'
 };
 
-var audioEl; // kept for programmatic seeking
+var audioEl; // the Call audio element, wired up by renderAudio
 
 /* ---------- loading ---------- */
 
@@ -253,9 +253,7 @@ function renderAudio(doc) {
   // 🩹 The recording url is an s3:// reference a browser cannot play. In the
   // DOCTOR view we fetch a short-lived presigned GET from /audio and stream
   // THAT; in offline/demo mode the backend has no real object and returns 404,
-  // so we show a clean "not available" note. The medication->seek still sets
-  // currentTime against the dialog turn's numeric start regardless, so the
-  // provenance behavior is demonstrable even with no audio loaded.
+  // so we show a clean "not available" note.
   //
   // In the ANALYST view we deliberately do NOT request the audio: a presigned
   // GET for the full recording is the un-redacted audio, so serving it in the
@@ -332,7 +330,7 @@ function renderMeds(doc) {
   }
   items.forEach(function (ent) {
     var isMed = ent.category === 'MEDICATION';
-    var chip = document.createElement(isMed ? 'button' : 'span');
+    var chip = document.createElement('span');
     chip.className = 'chip ' + (isMed ? 'medication' : 'condition');
     chip.appendChild(document.createTextNode(ent.text || '(unknown)'));
     var cat = document.createElement('span');
@@ -340,135 +338,8 @@ function renderMeds(doc) {
     cat.textContent = (ent.category || '') +
       (typeof ent.score === 'number' ? ' · ' + ent.score : '');
     chip.appendChild(cat);
-    if (isMed) {
-      chip.type = 'button';
-      chip.title = 'Jump audio to where this was mentioned';
-      chip.addEventListener('click', function () { seekToEntity(doc, idx); });
-    }
     wrap.appendChild(chip);
   });
-}
-
-/**
- * Headline payoff: clicking a medication jumps to where it was mentioned.
- *
- * The click must ALWAYS produce visible feedback. The provenance chain is
- * entities entry -> first dialog turn index -> that turn's `start`. We resolve
- * the turn index independently of the numeric start so the two headline
- * behaviors degrade gracefully:
- *
- *   1) We ALWAYS highlight + scroll to the provenance dialog turn (the user
- *      SEES the jump in the live transcript panel), and set a clear status.
- *   2) If the turn's `start` is a usable number we ALSO seek the audio element
- *      and try to play. But on real calls the live agent records ISO-string
- *      starts that `shape_record_for_frontend` cannot coerce to a float, so
- *      `resolveEntityStartSeconds` returns null -- in that case we skip the
- *      seek and tell the user audio position isn't available, WITHOUT bailing
- *      out of the highlight.
- *   3) In the analyst view the audio is deliberately withheld (no src), and in
- *      offline/demo mode the <audio> may have no playable source. Either way
- *      the highlight + status still happen, so the click never looks dead.
- *
- * Status is set via setStatus (textContent), so it stays XSS-safe even though
- * the medication name comes from record data.
- */
-function seekToEntity(doc, entitiesEntryIndex) {
-  var entry = (doc.analysis || [])[entitiesEntryIndex] || {};
-  var turnIndex = firstDialogTurnIndex(entry);
-  var medName = medicationLabelForEntitiesEntry(entry);
-
-  // Always try to make the provenance turn visible first. highlightTurn no-ops
-  // safely if there is no matching <li> (e.g. turnIndex is null).
-  highlightTurn(doc, turnIndex);
-
-  if (turnIndex == null) {
-    // No provenance turn recorded at all: say so plainly instead of throwing.
-    setStatus(
-      'No dialog-turn provenance is recorded for ' + medName + '.',
-      'error'
-    );
-    return;
-  }
-
-  var start = resolveEntityStartSeconds(doc, entitiesEntryIndex);
-
-  if (start == null) {
-    // Non-numeric / missing start (e.g. an ISO timestamp from a live call):
-    // we cannot seek, but the turn IS highlighted, so give an informative
-    // status rather than failing silently.
-    setStatus(
-      'Jumped to where ' + medName + ' was mentioned (dialog turn #' +
-      turnIndex + '). Audio position isn\u2019t available for this record.',
-      'ok'
-    );
-    return;
-  }
-
-  // Numeric start: seek the audio if we can. The highlight already happened, so
-  // even when the media can\u2019t actually play (analyst view withholds audio;
-  // no src / not seekable offline) the user still sees the jump + a status.
-  var audioSeeked = false;
-  if (audioEl && audioEl.getAttribute('src')) {
-    try {
-      audioEl.currentTime = start;
-      audioSeeked = true;
-      var playPromise = audioEl.play();
-      if (playPromise && typeof playPromise.catch === 'function') {
-        playPromise.catch(function () { /* no audio / autoplay blocked — fine */ });
-      }
-    } catch (e) { /* ignore: media may not be ready / seekable */ }
-  }
-
-  var turn = (doc.dialog || [])[turnIndex] || {};
-  var dur = typeof turn.duration === 'number' ? turn.duration : null;
-  var window_ = dur != null
-    ? ' (window ' + start.toFixed(1) + '\u2013' + (start + dur).toFixed(1) + 's)'
-    : '';
-  if (audioSeeked) {
-    setStatus(
-      'Seeked audio to ' + start.toFixed(1) + 's' + window_ +
-      ' \u2014 ' + medName + ', dialog turn #' + turnIndex + '.',
-      'ok'
-    );
-  } else {
-    // We have a time but no playable audio here. Still a successful jump.
-    setStatus(
-      'Jumped to where ' + medName + ' was mentioned at ' + start.toFixed(1) +
-      's' + window_ + ' (dialog turn #' + turnIndex + '). Audio isn\u2019t ' +
-      'available in this view.',
-      'ok'
-    );
-  }
-}
-
-/**
- * Best-effort human label for the medication an entities entry's click targets.
- *
- * The entities entry's `body` is the list of extracted entities; the first
- * MEDICATION's `text` is the clicked chip's label. Falls back to the first
- * entity's text, then a generic word, so the status always names something.
- * Pure string read -- the caller renders it via textContent (XSS-safe).
- */
-function medicationLabelForEntitiesEntry(entry) {
-  var items = (entry && Array.isArray(entry.body)) ? entry.body : [];
-  for (var i = 0; i < items.length; i++) {
-    if (items[i] && items[i].category === 'MEDICATION' && items[i].text) {
-      return items[i].text;
-    }
-  }
-  if (items.length && items[0] && items[0].text) return items[0].text;
-  return 'this medication';
-}
-
-function highlightTurn(doc, turnIndex) {
-  var ol = $('dialog');
-  var lis = ol.querySelectorAll('li');
-  lis.forEach(function (li) { li.classList.remove('highlight'); });
-  var target = ol.querySelector('li[data-turn="' + turnIndex + '"]');
-  if (target) {
-    target.classList.add('highlight');
-    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  }
 }
 
 function fmtTime(t) {
