@@ -39,9 +39,12 @@ Install the app extra and start one process that serves both the API and the UI:
 ```bash
 pip install -e '.[app]'
 PYTHONPATH=src:infrastructure/functions/seal \
-    uvicorn vcon_agent.app.main:app --reload
+    python -m uvicorn vcon_agent.app.main:app --reload
 # open http://127.0.0.1:8000/
 ```
+
+Launch with `python -m uvicorn` (not a bare `uvicorn`) so the server always runs
+under the same interpreter as your active virtualenv.
 
 ### Live mode (real call + real records)
 

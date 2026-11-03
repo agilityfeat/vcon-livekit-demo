@@ -524,9 +524,22 @@ vCon records the pipeline produces. The backend does all the crypto server-side
 (**verifies the JWS and decrypts the JWE** with the demo signing key) and serves
 readable vCon JSON, so the browser never touches the key.
 
-See **[docs/demo-app.md](docs/demo-app.md)** for the run story (live + offline),
-the frontend↔backend layout, fixture regeneration, and the acknowledged
-shortcuts.
+Quick start — install the `app` extra and run one process that serves both the
+API and the UI, then open <http://127.0.0.1:8000/>:
+
+```bash
+pip install -e '.[app]'
+PYTHONPATH=src:infrastructure/functions/seal \
+    python -m uvicorn vcon_agent.app.main:app --reload
+```
+
+For a real patient↔bot call, also run the agent worker in another terminal
+(`python -m vcon_agent.agent dev`). To browse the records with no call and no
+AWS, comment out `BUCKET_NAME` in `.env` first (offline fixture mode).
+
+See **[docs/demo-app.md](docs/demo-app.md)** for the full run story (live +
+offline), the frontend↔backend layout, fixture regeneration, and the
+acknowledged shortcuts.
 
 ## Compliance
 
