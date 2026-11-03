@@ -139,11 +139,11 @@
   <script src="app.js"></script>
   <!--
     🩹 Demo shortcut: prefill the room from a ?room= URL hint BEFORE call.js runs.
-    call.js is a frozen script that reads the room only from #room-input, so the
-    doctor dashboard's "Enter call" links carry the patient's room as ?room= and
-    this tiny inline classic script copies it into #room-input first. → Production:
-    the room would be derived from an authenticated, server-issued call record,
-    not a client-supplied query param.
+    call.js is a frozen script that reads the room only from #room-input, so any
+    link that carries a patient's room as ?room= relies on this tiny inline
+    classic script to copy it into #room-input first. → Production: the room
+    would be derived from an authenticated, server-issued call record, not a
+    client-supplied query param.
   -->
   <script>
     (function () {

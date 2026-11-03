@@ -6,16 +6,13 @@
  * Each record is a COMPLETED, signed intake call. Clicking an entry opens the
  * shared record detail page as the doctor's FULL, non-redacted clinical view
  * (record.html?run=<run_prefix>&view=doctor -- doctor is record.js's default
- * view anyway), and every entry carries an ENTER CALL link into the live call
- * screen (call.html?room=<room>) keyed on the record's room.
+ * view anyway).
  *
  * 🩹 Demo shortcut: there is no doctor-specific backend here -- this reuses the
- * public records list, and the ENTER CALL links just open call.html with a
- * ?room= hint (call.html's inline prefill script copies it into #room-input
- * before the frozen call.js runs). The schedule form below is a UI-only
- * affordance: nothing is persisted and there is NO scheduling backend. →
- * Production: fetch the authenticated clinician's own patient roster/records
- * from a role-gated service and persist newly scheduled calls.
+ * public records list. The schedule form below is a UI-only affordance:
+ * nothing is persisted and there is NO scheduling backend. → Production: fetch
+ * the authenticated clinician's own patient roster/records from a role-gated
+ * service and persist newly scheduled calls.
  */
 
 'use strict';
@@ -66,16 +63,6 @@ function renderRecords(records) {
     info.appendChild(meta);
 
     li.appendChild(info);
-
-    var enter = document.createElement('a');
-    enter.className = 'btn-primary enter-call-btn';
-    // Link into the live call screen with a room hint. call.html has a small
-    // inline prefill script (before the frozen call.js) that reads this ?room=
-    // query and copies it into #room-input, so the doctor lands in this
-    // record's room instead of the default 'intake'.
-    enter.href = 'call.html?room=' + encodeURIComponent(rec.room || rec.run_prefix);
-    enter.innerHTML = '<span aria-hidden="true">📞</span> Enter call';
-    li.appendChild(enter);
 
     list.appendChild(li);
   });

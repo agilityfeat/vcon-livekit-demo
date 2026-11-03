@@ -1,12 +1,13 @@
 <!DOCTYPE html>
 <!--
-  Record detail page with a doctor/analyst toggle.
-
-  The toggle switches which backend endpoint's JSON is shown:
-    * Doctor   -> GET /api/records/{run}/full      (decrypted + verified full vCon)
-    * Analyst  -> GET /api/records/{run}/redacted   (verified redacted vCon)
-  The backend already did ALL the JOSE (decrypt + verify) server-side, so this
-  page NEVER touches keys or crypto -- it just renders readable vCon JSON.
+  Record detail page. The ?view= link param decides which role's report renders:
+    * Doctor   -> ?view=doctor (or absent/default) -> GET /api/records/{run}/full      (decrypted + verified full vCon)
+    * Analyst  -> ?view=analyst                     -> GET /api/records/{run}/redacted   (verified redacted vCon)
+  Links from the doctor dashboard carry &view=doctor and links from the analyst
+  dashboard carry &view=analyst, so the page renders the correct report with no
+  on-page switch. The backend already did ALL the JOSE (decrypt + verify)
+  server-side, so this page NEVER touches keys or crypto -- it just renders
+  readable vCon JSON.
 
   Doctor view: the full clinical report plus the medication->audio provenance
   seek (click a MEDICATION entity to jump the audio to the dialog turn it was
@@ -18,9 +19,10 @@
   surfaced (only labeled as an encrypted, inaccessible reference). The full
   recording audio is withheld from this view.
 
-  🩹 Demo shortcut: no auth; the doctor/analyst "role" is this client-side
-  toggle, so anyone can see either view. → Production: role-gated, audit-logged
-  access with the full (decrypted) view restricted to authorized clinicians.
+  🩹 Demo shortcut: no auth; the doctor/analyst "role" is just the ?view= link
+  param set by whichever dashboard linked here, so anyone can reach either view
+  by editing the URL. → Production: role-gated, audit-logged access with the
+  full (decrypted) view restricted to authorized clinicians.
 -->
 <html lang="en">
 <head>
@@ -49,20 +51,12 @@
       <h2>Call record</h2>
       <p>
         Review this intake conversation as a full clinical report or as a
-        de-identified analyst report. Use the role switch below to change which
-        view you're reading.
+        de-identified analyst report. Which report you see is determined by the
+        link you followed here (the doctor dashboard links to the full report,
+        the analyst dashboard to the redacted one).
       </p>
       <p id="run-label" class="note"></p>
     </section>
-
-    <!-- Role switch: the doctor/analyst report selector. record.js toggles
-         .active + aria-pressed on these buttons via reflectModeButtons, so the
-         ids and class/aria pattern must stay exactly as-is. -->
-    <div class="view-toggle" role="group" aria-label="View as">
-      <span class="toggle-label">View as:</span>
-      <button id="view-doctor-btn" type="button" class="active" aria-pressed="true">Doctor (full)</button>
-      <button id="view-analyst-btn" type="button" aria-pressed="false">Analyst (redacted)</button>
-    </div>
 
     <p id="status" class="status" role="status" aria-live="polite"></p>
 

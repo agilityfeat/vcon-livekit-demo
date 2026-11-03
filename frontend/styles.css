@@ -528,7 +528,6 @@ input[type="text"] {
 .upcoming-call-patient { font-weight: 600; }
 .upcoming-call-time { color: var(--color-accent); font-size: 0.85rem; font-weight: 600; }
 .upcoming-call-reason { color: var(--color-text-muted); font-size: 0.85rem; }
-.enter-call-btn { text-decoration: none; white-space: nowrap; }
 
 /* ---------------- Call page status ---------------- */
 
@@ -606,10 +605,6 @@ input[type="text"] {
 }
 
 /* ---------------- Record detail (salvaged viewer styles) ---------------- */
-
-.view-toggle { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem; }
-.toggle-label { font-weight: 600; font-size: 0.9rem; }
-.view-toggle button.active { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-on-brand); }
 
 .link-banner {
   background: var(--color-warning-soft);
