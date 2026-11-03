@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<!--
+  Product landing page for the vCon + LiveKit demo app ("vCon Care").
+
+  This is the marketing/entry surface of the demo: it introduces the product
+  and routes a visitor to the intake call page (index.html) via a prominent
+  "click to call" call-to-action. It is a static page -- it fetches nothing and
+  mints no tokens; the actual call starts on index.html.
+
+  🩹 Demo shortcut: there is NO authentication here. The product "roles"
+  (patient / doctor / analyst) are just which page you open, not an authorization
+  decision, so this landing page does not sign anyone in. → Production: a real
+  authenticated front door with sign-in and role-gated access before any intake
+  call or record review.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>vCon Care &middot; Trusted intake calls, verifiable records</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <a class="app-brand" href="landing.html">
+      <span class="logo">🩺</span>
+      <h1>vCon Care</h1>
+      <span class="product-tag">intake &middot; records &middot; review</span>
+    </a>
+    <nav class="app-nav" aria-label="Primary">
+      <a href="landing.html" data-page="landing">Home</a>
+      <a href="index.html" data-page="index">Start call</a>
+      <a href="records.html" data-page="records">Records</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="landing-hero">
+      <p class="eyebrow">Virtual conversation records for care teams</p>
+      <h2>Patient intake calls your clinicians can actually trust.</h2>
+      <p>
+        vCon Care turns every intake conversation into a signed, encrypted
+        record. Patients talk to an automated assistant, and your care team
+        reviews the verified transcript and extracted clinical details
+        afterward &mdash; with the right view for every role.
+      </p>
+      <div class="hero-actions">
+        <a href="index.html" class="btn-primary btn-lg">Start an intake call</a>
+        <a href="records.html" class="link-secondary">Browse call records &rarr;</a>
+      </div>
+    </section>
+
+    <div class="section-head">
+      <h2>How vCon Care works</h2>
+      <p>One conversation, captured once and reviewable with role-appropriate detail.</p>
+    </div>
+
+    <section class="feature-grid">
+      <article class="feature-card">
+        <span class="feature-icon" aria-hidden="true">📞</span>
+        <h3>Automated intake calls</h3>
+        <p>
+          Patients join a live call with an automated intake assistant. The
+          conversation is recorded and transcribed in real time, so nothing from
+          the visit is lost.
+        </p>
+      </article>
+      <article class="feature-card">
+        <span class="feature-icon" aria-hidden="true">🔐</span>
+        <h3>Signed &amp; encrypted records</h3>
+        <p>
+          Each call becomes a vCon record that is cryptographically signed and
+          encrypted. The authoritative clinical transcript is verifiable, so you
+          always know the record has not been tampered with.
+        </p>
+      </article>
+      <article class="feature-card">
+        <span class="feature-icon" aria-hidden="true">👥</span>
+        <h3>Role-based review</h3>
+        <p>
+          Doctors see the full record with audio and clinical detail; analysts
+          see a de-identified, PHI-masked version of the same verified vCon.
+          Every role gets exactly the view it needs.
+        </p>
+      </article>
+    </section>
+
+    <section class="cta-band">
+      <h2>Ready to see it in action?</h2>
+      <p>Place an intake call and watch a verifiable record appear in seconds.</p>
+      <a href="index.html" class="btn-primary btn-lg">Start an intake call</a>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    vCon Care &middot; a demonstration of vCon + LiveKit for verifiable intake records.
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
