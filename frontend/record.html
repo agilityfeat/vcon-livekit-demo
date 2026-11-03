@@ -8,7 +8,7 @@
   The backend already did ALL the JOSE (decrypt + verify) server-side, so this
   page NEVER touches keys or crypto -- it just renders readable vCon JSON.
 
-  Doctor view: the salvaged rendering plus the medication->audio provenance
+  Doctor view: the full clinical report plus the medication->audio provenance
   seek (click a MEDICATION entity to jump the audio to the dialog turn it was
   mentioned in), with the recording streamed from a short-lived presigned URL.
   Analyst view: the redacted record led by a "De-identified — PHI masked"
@@ -46,9 +46,17 @@
   <main>
     <section class="hero">
       <h2>Call record</h2>
+      <p>
+        Review this intake conversation as a full clinical report or as a
+        de-identified analyst report. Use the role switch below to change which
+        view you're reading.
+      </p>
       <p id="run-label" class="note"></p>
     </section>
 
+    <!-- Role switch: the doctor/analyst report selector. record.js toggles
+         .active + aria-pressed on these buttons via reflectModeButtons, so the
+         ids and class/aria pattern must stay exactly as-is. -->
     <div class="view-toggle" role="group" aria-label="View as">
       <span class="toggle-label">View as:</span>
       <button id="view-doctor-btn" type="button" class="active" aria-pressed="true">Doctor (full)</button>
@@ -58,7 +66,9 @@
     <p id="status" class="status" role="status" aria-live="polite"></p>
 
     <div id="viewer" hidden>
-      <!-- Same-vCon linkage banner (analyst view only). -->
+      <!-- Same-vCon linkage banner (analyst view only). record.js injects the
+           ".redaction-badge" de-identification headline here and leaves it
+           hidden in the doctor view. -->
       <section id="link-banner" class="link-banner" hidden></section>
 
       <section class="panel" id="meta-panel">
