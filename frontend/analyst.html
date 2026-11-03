@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<!--
+  Analyst dashboard for the vCon + LiveKit demo app ("vCon Care").
+
+  The entry surface for an analyst's de-identified review workflow. It lists the
+  available call records (via the existing GET /api/records) and links each one
+  into the record detail page as the de-identified analyst report.
+
+  🩹 Demo shortcut: this page is presentational. There is NO auth gate -- it is
+  reachable by filename without signing in, and "analyst" is framing, not an
+  enforced authorization boundary. It reuses the SAME public GET /api/records
+  list the doctor/records pages use; the de-identification happens in the record
+  detail's analyst (redacted) view, not here. → Production: an enforced
+  authorization boundary so analysts only ever receive PHI-masked records, with
+  audit logging.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Analyst dashboard &middot; vCon Care</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <a class="app-brand" href="index.html">
+      <span class="logo">🩺</span>
+      <h1>vCon Care</h1>
+      <span class="product-tag">intake &middot; records &middot; review</span>
+    </a>
+    <nav class="app-nav" aria-label="Primary">
+      <a href="index.html" data-page="index">Home</a>
+      <a href="call.html" data-page="call">Start call</a>
+      <a href="records.html" data-page="records">Records</a>
+      <a href="doctor-signin.html" data-page="doctor-signin">Doctor</a>
+      <a href="analyst-signin.html" data-page="analyst-signin">Analyst</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h2>De-identified record review</h2>
+      <p>
+        Open any record to review it as a <strong>de-identified, PHI-masked</strong>
+        analyst report. Direct identifiers are redacted; the verified vCon
+        linkage proves it is the same record a clinician sees in full.
+      </p>
+    </section>
+
+    <section class="panel">
+      <div class="list-head">
+        <h3>Records available for review</h3>
+        <p id="status" class="status" role="status" aria-live="polite"></p>
+      </div>
+      <ul id="record-list" class="record-list"></ul>
+      <div id="empty-state" class="empty-state" hidden>
+        <span class="empty-icon" aria-hidden="true">🗂️</span>
+        <p><strong>No records yet.</strong></p>
+        <p>Records appear here once an intake call has been processed.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    vCon Care &middot; a demonstration of vCon + LiveKit for verifiable intake records.
+  </footer>
+
+  <script src="app.js"></script>
+  <script src="analyst.js"></script>
+</body>
+</html>

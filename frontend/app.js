@@ -14,6 +14,11 @@
   var path = window.location.pathname;
   var file = path.substring(path.lastIndexOf('/') + 1) || 'index.html';
   var page = file.replace(/\.html$/, '') || 'index';
+  // The doctor/analyst sign-in shells and their dashboards share one nav entry
+  // each (Doctor -> doctor-signin, Analyst -> analyst-signin), so map the
+  // dashboard page keys onto their sign-in nav link to keep it highlighted.
+  var navAlias = { doctor: 'doctor-signin', analyst: 'analyst-signin' };
+  if (navAlias[page]) page = navAlias[page];
   var links = document.querySelectorAll('.app-nav a[data-page]');
   for (var i = 0; i < links.length; i++) {
     if (links[i].getAttribute('data-page') === page) {

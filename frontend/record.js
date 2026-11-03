@@ -540,8 +540,15 @@ function init() {
   }
   $('run-label').textContent = 'run: ' + state.run;
   reflectModeButtons();
-  // Default to the doctor (full) view.
-  switchToDoctor();
+  // Default to the doctor (full) view, but honor an optional ?view= hint so a
+  // link from the analyst dashboard can arrive straight in the redacted view.
+  // Additive only: any value other than 'analyst' keeps the doctor default.
+  var view = new URLSearchParams(window.location.search).get('view');
+  if (view === 'analyst') {
+    switchToAnalyst();
+  } else {
+    switchToDoctor();
+  }
 }
 
 init();
