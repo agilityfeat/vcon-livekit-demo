@@ -138,6 +138,116 @@ def test_add_dialog_turn_by_role():
     assert [d["party"] for d in dialog] == [0, 1]
 
 
+# ----------------------------------------------------------------------------
+# Numeric per-turn offset: a dialog turn created with a numeric start_offset
+# gets a NUMERIC ``start`` (seconds from call start) and the ISO wall-clock
+# moves to ``start_iso``. Default (no offset) is unchanged. (The authoritative-
+# transcript speaker->party reconciliation no longer consumes these starts -- it
+# maps by Transcribe speaker order -- but the numeric offset remains recorded.)
+# ----------------------------------------------------------------------------
+
+
+def test_add_dialog_turn_numeric_offset_sets_numeric_start_and_iso():
+    from vcon_agent.enrichment import _as_float
+
+    builder = VConBuilder()
+    builder.add_consent(granted=True)
+    entry = builder.add_dialog_turn(PATIENT_INDEX, "I have a headache.", start_offset=4.0)
+
+    # ``start`` is the numeric offset (float seconds) and enrichment accepts it.
+    assert entry["start"] == 4.0
+    assert isinstance(entry["start"], float)
+    assert _as_float(entry["start"]) == 4.0
+    # Human-readable ISO wall-clock is preserved under start_iso, not dropped.
+    assert "start_iso" in entry
+    assert entry["start_iso"]  # non-empty ISO string
+    # start_iso is NOT numeric (it is the ISO instant), so it stays human-facing.
+    assert _as_float(entry["start_iso"]) is None
+
+
+def test_add_dialog_turn_zero_offset_is_numeric_not_dropped():
+    # Offset 0.0 (first turn at call start) must still produce a numeric start,
+    # not fall back to ISO -- a naive truthiness check would mis-handle 0.0.
+    from vcon_agent.enrichment import _as_float
+
+    builder = VConBuilder()
+    builder.add_consent(granted=True)
+    entry = builder.add_dialog_turn(AGENT_INDEX, "What brings you in?", start_offset=0.0)
+    assert entry["start"] == 0.0
+    assert _as_float(entry["start"]) == 0.0
+    assert "start_iso" in entry
+
+
+def test_add_dialog_turn_default_start_is_iso_back_compat():
+    # No offset -> unchanged behavior: ``start`` is the ISO wall-clock (which
+    # enrichment skips as non-numeric), and there is no start_iso field.
+    from vcon_agent.enrichment import _as_float
+
+    builder = VConBuilder()
+    builder.add_consent(granted=True)
+    entry = builder.add_dialog_turn(PATIENT_INDEX, "I have a headache.")
+    assert isinstance(entry["start"], str)
+    assert _as_float(entry["start"]) is None  # ISO -> not numeric
+    assert "start_iso" not in entry
+
+
+def test_add_dialog_turn_by_role_threads_numeric_offset():
+    builder = VConBuilder()
+    builder.add_consent(granted=True)
+    entry = builder.add_dialog_turn_by_role("user", "hello", start_offset=2.5)
+    assert entry["party"] == PATIENT_INDEX
+    assert entry["start"] == 2.5
+    assert entry["start_iso"]
+
+
+def test_reconciliation_resolves_parties_by_speaking_order():
+    # Order-based mapping (option 2a): the speaker label whose FIRST Transcribe
+    # segment starts earliest is the AGENT (agent opens the scripted intake), the
+    # other distinct label is the PATIENT. spk_0 speaks first here.
+    from vcon_agent.enrichment import reconcile_segments_to_parties
+
+    builder = VConBuilder()
+    builder.add_consent(granted=True)
+    builder.add_dialog_turn(AGENT_INDEX, "What brings you in today?", start_offset=0.0)
+    builder.add_dialog_turn(PATIENT_INDEX, "I've had a headache.", start_offset=4.0)
+    dialog_turns = builder.to_dict()["dialog"]
+
+    # Transcribe Medical segments (seconds from recording start, begin at 0.0).
+    segments = [
+        {"speaker": "spk_0", "start": 0.0, "end": 3.0, "text": "What brings you in today?"},
+        {"speaker": "spk_1", "start": 4.0, "end": 6.0, "text": "I've had a headache."},
+    ]
+    turns = reconcile_segments_to_parties(segments, dialog_turns)
+    by_speaker = {t["speaker"]: t["party"] for t in turns}
+    # spk_0 speaks first -> agent; spk_1 later -> patient.
+    assert by_speaker["spk_0"] == AGENT_INDEX
+    assert by_speaker["spk_1"] == PATIENT_INDEX
+
+
+def test_reconciliation_ignores_dialog_starts():
+    # The mapping no longer depends on dialog-turn starts at all: with the
+    # ISO-string default starts (the real Deepgram shape, DIFFERENT clock origin
+    # from the Transcribe segments) the result is UNCHANGED -- order-based
+    # resolution still yields agent/patient by Transcribe segment order.
+    from vcon_agent.enrichment import reconcile_segments_to_parties
+
+    builder = VConBuilder()
+    builder.add_consent(granted=True)
+    # No start_offset -> ISO-string default starts.
+    builder.add_dialog_turn(AGENT_INDEX, "What brings you in today?")
+    builder.add_dialog_turn(PATIENT_INDEX, "I've had a headache.")
+    dialog_turns = builder.to_dict()["dialog"]
+
+    segments = [
+        {"speaker": "spk_0", "start": 0.0, "end": 3.0, "text": "What brings you in today?"},
+        {"speaker": "spk_1", "start": 4.0, "end": 6.0, "text": "I've had a headache."},
+    ]
+    turns = reconcile_segments_to_parties(segments, dialog_turns)
+    by_speaker = {t["speaker"]: t["party"] for t in turns}
+    assert by_speaker["spk_0"] == AGENT_INDEX
+    assert by_speaker["spk_1"] == PATIENT_INDEX
+
+
 def test_run_key_layout_exact():
     key = run_key("room-abc", "2024-01-01T00:00:00+00:00")
     assert key == "room-abc/2024-01-01T00:00:00+00:00/vcon-skeleton.json"
@@ -298,6 +408,63 @@ def test_add_transcript_analysis_authoritative_with_provenance():
     # Turn-index provenance references the covered dialog turns.
     assert entry["dialog"] == [0, 2]
     assert entry["body"] == "Patient reports a headache for two days."
+
+
+def test_add_transcript_analysis_stores_structured_turns():
+    builder = VConBuilder()
+    turns = [
+        {"party": 0, "speaker": "spk_0", "start": 1.0, "end": 5.0,
+         "text": "I have a headache."},
+        {"party": 1, "speaker": "spk_1", "start": 6.0, "end": 9.0,
+         "text": "How long?"},
+    ]
+    entry = builder.add_transcript_analysis(
+        "I have a headache. How long?",
+        dialog_indices=[0, 1],
+        turns=turns,
+    )
+
+    # The structured turns live on the SAME entry under a new `turns` key.
+    assert entry["turns"] == turns
+    # Defensive copy: mutating the input afterwards must not change the entry.
+    turns[0]["text"] = "mutated"
+    assert entry["turns"][0]["text"] == "I have a headache."
+    # The flat body and every existing key are preserved unchanged.
+    assert entry["type"] == "transcript"
+    assert entry["vendor"] == "aws-transcribe-medical"
+    assert entry["authoritative"] is True
+    assert entry["dialog"] == [0, 1]
+    assert entry["body"] == "I have a headache. How long?"
+    assert entry["mimetype"] == "text/plain"
+
+
+def test_add_transcript_analysis_without_turns_has_no_turns_key():
+    # Back-compat: omitting turns (or passing an empty list) yields the original
+    # flat-only entry shape with NO `turns` key.
+    builder = VConBuilder()
+    entry = builder.add_transcript_analysis("flat text", dialog_indices=[0])
+    assert "turns" not in entry
+    assert entry["body"] == "flat text"
+
+    empty_entry = builder.add_transcript_analysis(
+        "flat text 2", dialog_indices=[1], turns=[]
+    )
+    assert "turns" not in empty_entry
+
+
+def test_analysis_order_preserved_with_structured_turns():
+    # The deterministic analysis order (transcript, entities, summary) still holds
+    # when the transcript entry carries structured turns.
+    builder = VConBuilder()
+    builder.add_transcript_analysis(
+        "t",
+        dialog_indices=[0],
+        turns=[{"party": 0, "speaker": "spk_0", "start": 0.0, "end": 1.0, "text": "t"}],
+    )
+    builder.add_entities_analysis([{"category": "MEDICATION", "text": "x"}], 0)
+    builder.add_summary_analysis("s", dialog_indices=[0])
+    types = [a["type"] for a in builder.to_dict()["analysis"]]
+    assert types == ["transcript", "entities", "summary"]
 
 
 def test_add_transcript_analysis_can_be_non_authoritative():

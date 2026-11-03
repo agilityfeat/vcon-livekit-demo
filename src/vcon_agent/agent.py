@@ -23,13 +23,11 @@ credentials and is out of scope for automated verification.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
-
-from dotenv import find_dotenv, load_dotenv
 
 from livekit import api
 from livekit.agents import (
@@ -42,50 +40,20 @@ from livekit.agents import (
 )
 from livekit.plugins import deepgram, elevenlabs, openai
 
+from .config import (
+    ENV_AWS_ACCESS_KEY_ID,
+    ENV_AWS_REGION,
+    ENV_AWS_SECRET_ACCESS_KEY,
+    ENV_BUCKET_NAME,
+    ENV_LIVEKIT_API_KEY,
+    ENV_LIVEKIT_API_SECRET,
+    ENV_LIVEKIT_URL,
+    load_env,
+)
 from .persistence import persist_vcon
 from .vcon import DEFAULT_CONSENT_SCRIPT, VConBuilder, recording_key, role_to_index
 
 logger = logging.getLogger("vcon_agent.agent")
-
-# Environment variable names for the egress seam (bucket/region mirror
-# persistence.py; the LiveKit creds are the same ones the worker/plugins read).
-ENV_BUCKET_NAME = "BUCKET_NAME"
-ENV_AWS_REGION = "AWS_REGION"
-ENV_AWS_ACCESS_KEY_ID = "AWS_ACCESS_KEY_ID"
-ENV_AWS_SECRET_ACCESS_KEY = "AWS_SECRET_ACCESS_KEY"
-ENV_LIVEKIT_URL = "LIVEKIT_URL"
-ENV_LIVEKIT_API_KEY = "LIVEKIT_API_KEY"
-ENV_LIVEKIT_API_SECRET = "LIVEKIT_API_SECRET"
-
-
-def load_env() -> None:
-    """Load a local ``.env`` into ``os.environ`` early and cwd-independently.
-
-    The LiveKit worker reads ``LIVEKIT_URL`` / ``LIVEKIT_API_KEY`` /
-    ``LIVEKIT_API_SECRET`` to connect and REGISTER, which happens inside
-    ``cli.run_app(...)`` in :func:`main` -- *before* any job (so before
-    :func:`entrypoint`) ever runs. The ``.env`` must therefore be loaded before
-    the worker starts, not per-job, otherwise ``python -m vcon_agent.agent dev``
-    fails at registration with "ws_url is required, or set LIVEKIT_URL ...".
-
-    Resolution is cwd-independent so the process can be launched from any
-    directory: we first anchor to the project root relative to this file (the
-    repo root holds ``.env`` / ``.env.example``), then fall back to
-    :func:`find_dotenv`, which searches upward from the cwd. If neither finds a
-    file, ``load_dotenv`` is a harmless no-op and the agent still starts from the
-    real environment (container-injected vars, a parent shell, etc.).
-
-    We do NOT pass ``override=True``: variables already set in the real
-    environment take precedence over the local ``.env`` file.
-    """
-    # src/vcon_agent/agent.py -> repo root is three parents up.
-    project_root_env = Path(__file__).resolve().parents[2] / ".env"
-    if project_root_env.is_file():
-        load_dotenv(project_root_env)
-        return
-    # Fall back to searching upward from the current working directory.
-    load_dotenv(find_dotenv())
-
 
 # Load the local .env at import time so credentials are present no matter how the
 # module is reached (``python -m vcon_agent.agent`` or a direct import). This is
@@ -118,7 +86,12 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def handle_item(builder: VConBuilder, role: str, text: str) -> bool:
+def handle_item(
+    builder: VConBuilder,
+    role: str,
+    text: str,
+    start_offset: Optional[float] = None,
+) -> bool:
     """Translate one committed conversation item into a vCon dialog turn.
 
     This is the pure glue between LiveKit's ``conversation_item_added`` event and
@@ -130,6 +103,16 @@ def handle_item(builder: VConBuilder, role: str, text: str) -> bool:
     ``assistant`` -> 1 agent) and the turn is appended in order. Non-dialog roles
     (``system``/``developer``) and empty/whitespace-only text are skipped.
 
+    ``start_offset`` (optional) is the numeric per-turn offset in seconds from the
+    call start. When provided it is threaded into
+    :meth:`~vcon_agent.vcon.VConBuilder.add_dialog_turn` so the turn gets a NUMERIC
+    ``start`` (the ISO wall-clock moves to ``start_iso``), which lets the
+    authoritative-transcript speaker->party reconciliation time-overlap Transcribe
+    segments against this turn. It is passed in already-computed so this helper
+    stays pure and deterministic (no real clock here); the actual ``now - session
+    start`` math is done at the call site in :func:`entrypoint`. When ``None``,
+    behavior is unchanged (ISO ``start``, back-compat).
+
     Returns ``True`` if a dialog turn was appended, ``False`` if the item was
     skipped.
     """
@@ -140,8 +123,27 @@ def handle_item(builder: VConBuilder, role: str, text: str) -> bool:
         return False
     if text is None or not text.strip():
         return False
-    builder.add_dialog_turn(role_to_index(normalized), text)
+    builder.add_dialog_turn(
+        role_to_index(normalized), text, start_offset=start_offset
+    )
     return True
+
+
+def _offset_seconds_from(session_start_iso: str, now_iso: str) -> Optional[float]:
+    """Return ``now_iso - session_start_iso`` in seconds, or ``None`` on failure.
+
+    Both arguments are ISO 8601 instants (as produced by :func:`_utc_now_iso`).
+    This is the pure numeric-offset computation done at the call site so the clock
+    reading/parsing stays out of the unit-tested :func:`handle_item`. Any parse
+    error returns ``None`` so the caller falls back to the ISO-only turn rather
+    than breaking the call.
+    """
+    try:
+        start = datetime.fromisoformat(session_start_iso)
+        now = datetime.fromisoformat(now_iso)
+        return (now - start).total_seconds()
+    except (TypeError, ValueError):
+        return None
 
 
 def build_egress_request(
@@ -376,8 +378,14 @@ async def entrypoint(ctx: JobContext) -> None:
         item = event.item
         role = getattr(item, "role", None)
         text = getattr(item, "text_content", None)
+        # Numeric per-turn offset (seconds from call start): compute it HERE (at
+        # the call site, where the real clock lives and ``session_start_iso`` is
+        # in scope) and pass the float into the pure helper so handle_item stays
+        # deterministic/testable. Defensive: a parse failure yields None, which
+        # falls back to today's ISO-only turn rather than breaking the call.
+        start_offset = _offset_seconds_from(session_start_iso, _utc_now_iso())
         try:
-            handle_item(builder, role, text)
+            handle_item(builder, role, text, start_offset=start_offset)
         except Exception:  # pragma: no cover - defensive; never break the call
             logger.exception("failed to record dialog turn (role=%r)", role)
 
@@ -385,8 +393,16 @@ async def entrypoint(ctx: JobContext) -> None:
     # with the local-file fallback when the AWS backend env is absent and a
     # guarded StartExecution when STATE_MACHINE_ARN is set.
     async def _flush_vcon() -> None:
+        # persist_vcon does synchronous, blocking work (boto3 client build, the
+        # S3 PutObject, and the guarded Step Functions StartExecution). Running
+        # it directly here would block the agent's event loop and delay audio /
+        # turn handling, so the whole blocking call (including the
+        # builder.to_dict() snapshot) runs in a worker thread via
+        # asyncio.to_thread and is awaited. The session has ended by shutdown, so
+        # snapshotting the vCon at call time in the worker thread is safe.
         try:
-            result = persist_vcon(
+            result = await asyncio.to_thread(
+                persist_vcon,
                 builder.to_dict(),
                 room_name,
                 session_start_iso,

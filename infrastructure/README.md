@@ -31,7 +31,7 @@ ever sleeps past its timeout.
 | Resource | Purpose |
 |---|---|
 | **S3 bucket** (`AWS::S3::Bucket`) | Recordings from LiveKit Egress + skeleton / enriched / redacted vCon JSON. Versioning on, SSE-S3 default encryption, all public access blocked. |
-| **Inline Lambda functions** (`AWS::Lambda::Function`) | The seven boto3-only pipeline steps invoked by the state machine, inline Python: `poll-recording-step` (poll S3 for the recording), `load-skeleton-step` (load the skeleton vCon), `start-transcription-step` (start the Transcribe Medical batch job), `get-transcription-step` (poll the job once), `comprehend-step` (Comprehend Medical meds + conditions), `bedrock-step` (physician summary), and `merge-step` (merge results into `analysis[]` with turn-index provenance). Each body mirrors the pure, offline-tested logic in `src/vcon_agent/enrichment.py` + `vcon.py` (inline code cannot import the repo package at AWS runtime). These seven import only `boto3`, which the Lambda runtime provides, so they need no build step. |
+| **Inline Lambda functions** (`AWS::Lambda::Function`) | The seven boto3-only pipeline steps invoked by the state machine, inline Python: `poll-recording-step` (poll S3 for the recording), `load-skeleton-step` (load the skeleton vCon), `start-transcription-step` (start the Transcribe Medical batch job), `get-transcription-step` (poll the job once), `comprehend-step` (Comprehend Medical meds + conditions), `bedrock-step` (physician summary built from the authoritative Transcribe Medical transcript, not the live `dialog[]` turns), and `merge-step` (merge results into `analysis[]` with turn-index provenance). Each body mirrors the pure, offline-tested logic in `src/vcon_agent/enrichment.py` + `vcon.py` (inline code cannot import the repo package at AWS runtime). These seven import only `boto3`, which the Lambda runtime provides, so they need no build step. |
 | **Packaged Seal Lambda** (`AWS::Serverless::Function`) | The `seal-step`, wired after `merge-step`: it signs the enriched vCon (JWS), encrypts the full copy (JWE), and writes a redacted sibling, persisting the three objects to S3. Unlike the seven inline steps, this one is **not** inlined: it is a container-built SAM function (`CodeUri: functions/seal/`, `Handler: seal_handler.handler`, `Runtime: python3.12`, `Metadata.BuildMethod: python3.12`) that **imports the sealing core packaged alongside it (`functions/seal/sealing.py`)** directly instead of re-mirroring the crypto by hand. It depends on `jwcrypto` -> `cryptography`, which ships compiled native binaries, so it requires `sam build --use-container` (see Deploy below). |
 | **Step Functions state machine** (`AWS::StepFunctions::StateMachine`) | The enrichment orchestrator. Polls S3 for the recording, runs Transcribe Medical as an async batch whose completion the state machine awaits, then runs Comprehend Medical and Bedrock as a parallel branch, then merges into `analysis[]`. Invoked by the local app via a deterministic, idempotent `StartExecution`. |
 | **IAM roles** (`AWS::IAM::Role`) | A Step Functions execution role (invokes all seven pipeline Lambdas + writes execution logs) and a Lambda execution role granting access to Transcribe Medical, Comprehend Medical, Bedrock, S3, and CloudWatch Logs. |
@@ -185,12 +185,24 @@ Optional parameter overrides:
 sam deploy \
   --stack-name vcon-livekit-demo \
   --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides ProjectName=vcon-livekit-demo Environment=dev BedrockModelId=global.anthropic.claude-haiku-5-5
+  --parameter-overrides ProjectName=vcon-livekit-demo Environment=dev BedrockModelId=global.anthropic.claude-haiku-5-5 VconSigningPrivateJwk='<jwk-or-pem>'
 ```
 
 `BedrockModelId` must be a Bedrock inference-profile id (default
 `global.anthropic.claude-haiku-5-5`); override it to pin a different model or a
 geo profile such as `us.anthropic.claude-haiku-5-5`.
+
+`VconSigningPrivateJwk` is the shared JWS/JWE demo signing key the Seal step
+uses to sign and encrypt the vCon artifacts. It MUST match the backend's `.env`
+`VCON_SIGNING_PRIVATE_JWK`, because the backend verifies and decrypts those same
+artifacts with it (only the private key must match; the backend derives the
+public half from it). Leaving it empty (the default) makes the Seal step
+generate an **ephemeral per-invocation key** whose records can never be read
+back by the viewer. Generate a demo keypair with:
+
+```bash
+python -c "from jwcrypto import jwk; print(jwk.JWK.generate(kty='RSA', size=2048).export(private_key=True))"
+```
 
 ### Sealing core
 
@@ -282,6 +294,23 @@ The clinical **Transcribe Medical** transcript is added to `analysis[]` marked
 `dialog[]`. This dual-transcript shape is deliberate: the real-time agent STT is
 tuned for latency, Transcribe Medical for clinical accuracy, and vCon holds both
 with provenance rather than forcing you to reconcile two vendor records by hand.
+
+Because the clinical artifacts must carry the clinically-accurate terms, the
+`bedrock-step` physician **summary is generated from the AUTHORITATIVE Transcribe
+Medical transcript** (the `transcript_text` the state machine threads into the
+`Analyze` branch, stored in `analysis[]`), **not** the live `dialog[]` turns. The
+live STT can mis-hear a clinical term (for example a medication name heard as a
+common word), and summarizing from it would propagate that error; Transcribe
+Medical captures the term correctly, so the summary does too.
+
+> 🩹 Shortcut → Production: summarizing from the authoritative transcript blob is
+> clinically correct for terms like medication names, but it LOSES the clean
+> Patient/Agent speaker attribution the live dialog turns provide (the
+> authoritative transcript is a single undifferentiated string). Production
+> should reconcile the diarized medical transcript with the live turns to get
+> BOTH speaker structure AND clinical accuracy, for example via the
+> `map_turns_by_timestamp_overlap` helper in `src/vcon_agent/enrichment.py`
+> (unit-tested but intentionally not wired into the demo).
 
 ### Start it by hand
 
@@ -429,10 +458,13 @@ from a clean checkout is:
 sam build --use-container --template infrastructure/template.yaml
 
 # 3. Deploy the stack (first time: --guided; afterwards: the explicit form).
+#    VconSigningPrivateJwk MUST match the backend's .env VCON_SIGNING_PRIVATE_JWK
+#    (see the parameter note above); an empty value makes the Seal step generate
+#    an ephemeral per-invocation key whose records can never be read back.
 sam deploy \
   --stack-name vcon-livekit-demo \
   --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides ProjectName=vcon-livekit-demo Environment=dev BedrockModelId=global.anthropic.claude-haiku-5-5
+  --parameter-overrides ProjectName=vcon-livekit-demo Environment=dev BedrockModelId=global.anthropic.claude-haiku-5-5 VconSigningPrivateJwk='<jwk-or-pem>'
 
 # 4. Read the stack Outputs (BucketName / StateMachineArn / Region) into .env.
 cp .env.example .env     # at the repository root

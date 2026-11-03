@@ -12,6 +12,11 @@ documents.
 - **AWS enrichment backend** — an S3 bucket, a Step Functions state machine, the
   pipeline Lambda functions, and the IAM roles that tie them together, all
   provisioned by a single CloudFormation template.
+- **Demo application** — a single, locally-runnable app (FastAPI backend +
+  vanilla multi-page frontend) where a human patient places a real intake call
+  to the bot from the browser, and doctor / analyst roles review the produced
+  vCon records. See **[docs/demo-app.md](docs/demo-app.md)** for the
+  end-to-end run story and the demo shortcuts.
 
 ## Infrastructure
 
@@ -509,6 +514,33 @@ sibling with the container draft's section 4.1.6:
   SHA-512 digest of the exact stored JWE bytes, matching the draft's Externally
   Referenced Files examples.
 
-### Compliance
+## End-to-end demo application
+
+Everything above is tied together by a single, locally-runnable **demo
+application** that shows the whole vCon value chain from one app that looks like
+a real product. A **human patient** places a **real** intake call to the bot
+from the browser, and **doctor** and **analyst** roles asynchronously review the
+vCon records the pipeline produces. The backend does all the crypto server-side
+(**verifies the JWS and decrypts the JWE** with the demo signing key) and serves
+readable vCon JSON, so the browser never touches the key.
+
+Quick start — install the `app` extra and run one process that serves both the
+API and the UI, then open <http://127.0.0.1:8000/>:
+
+```bash
+pip install -e '.[app]'
+PYTHONPATH=src:infrastructure/functions/seal \
+    python -m uvicorn vcon_agent.app.main:app --reload
+```
+
+For a real patient↔bot call, also run the agent worker in another terminal
+(`python -m vcon_agent.agent dev`). To browse the records with no call and no
+AWS, comment out `BUCKET_NAME` in `.env` first (offline fixture mode).
+
+See **[docs/demo-app.md](docs/demo-app.md)** for the full run story (live +
+offline), the frontend↔backend layout, fixture regeneration, and the
+acknowledged shortcuts.
+
+## Compliance
 
 this PoC demonstrates the mechanisms vCon provides for consent, integrity, and redaction. It is not a HIPAA-certified deployment and must not be used with real PHI.

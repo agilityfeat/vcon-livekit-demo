@@ -286,9 +286,81 @@ def decrypt_vcon(jwe_serialization: str, private_key: jwk.JWK) -> str:
 # ---------------------------------------------------------------------------
 # Redaction.
 # ---------------------------------------------------------------------------
-# 🩹 Shortcut: Redaction = naive PII removal (regex / Comprehend Medical PHI pass
-# over known fields). → Production: vetted de-identification against the full PHI
-# surface, reviewed for the applicable safe-harbor/expert-determination standard.
+# 🩹 Shortcut: Redaction = naive PII removal (regex / Comprehend Medical PHI pass)
+# applied DENY-BY-DEFAULT across the redacted copy's free text. → Production:
+# vetted de-identification against the full PHI surface, reviewed for the
+# applicable safe-harbor/expert-determination standard.
+#
+# AUDIT RESULT — deny-by-default free-text coverage. The redactor used to mask an
+# ALLOWLIST of fields (dialog[].body, analysis[].body / entities, analysis[].
+# turns[].text) and silently left every OTHER free-text field unmasked, which is
+# how PHI leaked through fields the audit later found: ``subject``,
+# ``parties[].name``, the consent ``script``, and the recording dialog ``url``.
+# To stop new free-text fields from silently leaking as the model grows, free
+# text is now DENY-BY-DEFAULT: a recursive walk (:func:`_redact_free_text_strings`)
+# VISITS every string value and runs it through :func:`_redact_text` UNLESS its
+# key is in the explicit :data:`STRUCTURAL_ALLOWLIST` below — so a new free-text
+# field cannot silently escape the masking pass. What that pass actually removes
+# from a visited field is a separate question: offline it is only regex-matchable
+# PII (plus the whole-value name/url rules below); removing real clinical-term
+# PHI still depends on a live Comprehend Medical DetectPHI run. Two values are
+# handled with a
+# STRONGER rule than span masking and therefore BEFORE the generic walk:
+#   * ``parties[].name`` — HARD-REPLACED with the placeholder unconditionally (a
+#     name is PHI by nature; never leave it to span detection that DetectPHI may
+#     miss).
+#   * the recording dialog ``url`` — CLEARED to the placeholder (the s3:// audio
+#     location must not ride along in the de-identified copy).
+# The top-level ``redacted`` pointer subtree is SKIPPED entirely by the walk: its
+# uuid/type/url/content_hash are structural linkage back to the full signed copy,
+# NOT PHI, and must survive verbatim.
+
+# Structural (non-PHI) keys whose string values are intentionally KEPT by the
+# deny-by-default walk. Everything NOT listed here is masked. Derived from the
+# vCon model audit (src/vcon_agent/vcon.py VConBuilder):
+#   vcon         — spec version string ("0.0.1")
+#   uuid         — document / pointer identifier (random id, not identity)
+#   type         — object kind ('text'/'recording'/'transcript'/'entities'/
+#                  'summary'/'consent' + the pointer media type)
+#   vendor       — processing vendor label ('aws-transcribe-medical', ...)
+#   role         — party role / speaker label ('patient'/'agent'); the viewer and
+#                  speaker attribution depend on it, and it is a fixed label, not
+#                  a person's name
+#   mimetype     — media type ('text/plain', 'audio/ogg')
+#   speaker      — diarized speaker label on a transcript turn (role-like, not a
+#                  name)
+#   filename     — recording object filename (structural, no PHI)
+#   created_at   — document creation timestamp (ISO instant, not PHI)
+#   timestamp    — consent timestamp (ISO instant, not PHI)
+#   start_iso    — human-readable dialog turn wall-clock (ISO instant)
+#   content_hash — hash of the referenced full copy (pointer linkage)
+#   degraded     — fail-open marker string on an analysis entry (structural)
+#   category     — entity class label on an analysis entities entry
+#                  ('MEDICATION'/'MEDICAL_CONDITION'): a fixed enum the viewer
+#                  depends on (record.js renderMeds badges on category ==
+#                  'MEDICATION'), not PHI; the entity's ``text`` stays masked
+#
+# IMPORTANT: adding a NEW structural string key to the model means adding it
+# here; otherwise deny-by-default will (safely) mask it. A new FREE-TEXT field
+# needs NO change here — it defaults to masked, which is the point.
+STRUCTURAL_ALLOWLIST = frozenset(
+    {
+        "vcon",
+        "uuid",
+        "type",
+        "vendor",
+        "role",
+        "mimetype",
+        "speaker",
+        "filename",
+        "created_at",
+        "timestamp",
+        "start_iso",
+        "content_hash",
+        "degraded",
+        "category",
+    }
+)
 
 
 def _spans_from_regex(text: str) -> List[PhiSpan]:
@@ -376,6 +448,84 @@ def _redact_entities(
     return redacted
 
 
+def _redact_turns(
+    turns: Sequence[Dict[str, Any]], detect_phi: Optional[DetectPhi]
+) -> List[Dict[str, Any]]:
+    """Redact the ``text`` of each turn dict in an analysis entry's ``turns``.
+
+    The structured-transcript feature stores the authoritative Transcribe Medical
+    transcript as a ``turns`` list of ``{party, speaker, start, end, text}`` dicts
+    on the transcript analysis entry (in addition to the flat ``body``), and the
+    record view renders the clinical transcript from ``turns[].text``. So the
+    per-turn text is PHI-bearing and MUST be masked exactly like the bodies, or
+    the de-identified analyst view leaks PHI through the authoritative transcript.
+
+    Mirroring :func:`_redact_entities`: this keeps the list length and each turn's
+    other keys (``party``, ``speaker``, ``start``, ``end``) intact so structure is
+    preserved; only the ``text`` value is run through :func:`_redact_text`.
+    Non-dict items are passed through unchanged.
+    """
+    redacted: List[Dict[str, Any]] = []
+    for turn in turns:
+        if isinstance(turn, dict):
+            new_turn = dict(turn)
+            if isinstance(new_turn.get("text"), str):
+                new_turn["text"] = _redact_text(new_turn["text"], detect_phi)
+            redacted.append(new_turn)
+        else:
+            redacted.append(turn)
+    return redacted
+
+
+def _redact_free_text_strings(
+    node: Any, detect_phi: Optional[DetectPhi], key: Optional[str] = None
+) -> Any:
+    """Deny-by-default walk: mask every non-allowlisted string value in ``node``.
+
+    Recurses the already-deep-copied redacted document in place and, for every
+    string VALUE, runs :func:`_redact_text` UNLESS the key that string hangs off
+    is in :data:`STRUCTURAL_ALLOWLIST` (structural / non-PHI keys that are kept
+    verbatim). Numeric / bool / None values are never touched. This is what makes
+    the redactor deny-by-default: any field NOT listed as structural — including
+    a FUTURE free-text field — is VISITED and run through the masking pass, so a
+    new free-text field cannot silently escape coverage.
+
+    Note what this does and does NOT guarantee. The walk guarantees every
+    non-allowlisted free-text field is REACHED by :func:`_redact_text`; it does
+    NOT guarantee the field's PHI content is removed. What actually gets stripped
+    from a visited string still depends on the span sources inside
+    :func:`_redact_text` — the naive regex pass plus any injected DetectPHI /
+    canned spans. With no detect_phi (offline), only regex-matchable PII is
+    removed from visited strings (the whole-value name hard-replace and recording
+    url clear are handled by the caller, not here); removing real clinical-term
+    PHI depends on a live Comprehend Medical DetectPHI run supplying spans.
+
+    ``key`` is the dict key the current ``node`` was reached under (``None`` at
+    the root and for list elements). Strings reached via an allowlisted key are
+    returned unchanged; all other strings are masked.
+
+    Masking is idempotent with the explicit per-field passes: running
+    :func:`_redact_text` over text that is already fully the placeholder (or over
+    text that carries no further PHI span) is a no-op, so applying this walk on
+    top of the explicit dialog/analysis/turns/entities masking produces the SAME
+    result. Callers must handle the stronger-than-masking rules (party name
+    hard-replace, recording url clear) and skip the top-level ``redacted`` pointer
+    subtree BEFORE calling this walk.
+    """
+    if isinstance(node, dict):
+        for k, v in node.items():
+            node[k] = _redact_free_text_strings(v, detect_phi, key=k)
+        return node
+    if isinstance(node, list):
+        return [_redact_free_text_strings(item, detect_phi, key=None) for item in node]
+    if isinstance(node, str):
+        if key in STRUCTURAL_ALLOWLIST:
+            return node
+        return _redact_text(node, detect_phi)
+    # Numbers, booleans, None: never touched.
+    return node
+
+
 def redact_vcon(
     vcon_doc: Dict[str, Any],
     full_reference: Dict[str, Any],
@@ -386,10 +536,36 @@ def redact_vcon(
 
     The returned document keeps the STRUCTURE intact: the same top-level keys, the
     same ``parties`` / ``dialog`` / ``analysis`` / ``attachments`` shape and
-    ordering, and the same party indices. Sensitive content in the dialog turn
-    ``body`` text and the analysis ``body`` (both free-text summaries/transcripts
-    and ``entities`` entity ``text``) is replaced with :data:`REDACTION_PLACEHOLDER`
-    rather than dropped, so a consumer sees where redaction happened.
+    ordering, and the same party indices. Sensitive CONTENT is replaced with
+    :data:`REDACTION_PLACEHOLDER` rather than dropped, so a consumer sees where
+    redaction happened.
+
+    Free text is handled DENY-BY-DEFAULT (see the audit note above the
+    :data:`STRUCTURAL_ALLOWLIST` definition). The redactor:
+
+    1. HARD-REPLACES every ``parties[].name`` with the placeholder (a name is PHI
+       by nature; never span-masked, so a missed DetectPHI entity cannot leave a
+       real name behind) while keeping ``role`` and the party index/order.
+    2. CLEARS every recording dialog (``type == 'recording'``) ``url`` to the
+       placeholder so the s3:// audio location does not ride along, keeping the
+       recording object's type/start/duration/mimetype/filename.
+    3. Runs the DENY-BY-DEFAULT walk (:func:`_redact_free_text_strings`) over the
+       whole document EXCEPT the top-level ``redacted`` pointer subtree: every
+       string whose key is not in :data:`STRUCTURAL_ALLOWLIST` is VISITED and run
+       through the masking pass. This is a REACHABILITY guarantee — it covers
+       ``subject``, the consent ``script``, the dialog turn ``body``, the analysis
+       ``body`` / entity ``text`` / ``turns[].text``, and any FUTURE free-text
+       field by default, so none can silently escape. It is NOT a content
+       guarantee: what is actually stripped from a visited field depends on the
+       regex pass plus the injected DetectPHI / canned spans (see
+       :func:`_redact_text`), so offline only regex-matchable PII is removed and
+       real clinical PHI removal needs a live DetectPHI run. The explicit
+       dialog/analysis/turns/entities masking the suite already relies on is
+       reproduced EXACTLY by this walk (masking is idempotent), so that behavior
+       is unchanged in effect.
+
+    The top-level ``redacted`` pointer subtree is SKIPPED: its uuid/type/url/
+    content_hash are structural linkage back to the full signed copy, NOT PHI.
 
     Redaction combines a NAIVE regex pass (emails, phone numbers, SSN-like digit
     runs) with optional injected PHI spans:
@@ -408,8 +584,12 @@ def redact_vcon(
     the full copy itself must NOT carry a ``redacted`` pointer.
 
     🩹 Shortcut: Redaction = naive PII removal (regex / Comprehend Medical PHI
-    pass over known fields). → Production: vetted de-identification against the
-    full PHI surface, reviewed for the applicable safe-harbor/expert-determination
+    pass) applied DENY-BY-DEFAULT over free text with an explicit structural
+    allowlist; a name field is hard-replaced and the recording url is cleared.
+    Now-covered free-text surfaces: subject, party name (hard-replace), dialog
+    body, analysis body / entities / turns, consent script, recording url
+    (cleared). → Production: vetted de-identification against the full PHI
+    surface, reviewed for the applicable safe-harbor/expert-determination
     standard.
     """
     # Compose an effective detect_phi that also honors the canned phi_spans map.
@@ -430,21 +610,51 @@ def redact_vcon(
     # docs are plain JSON, so this is lossless.
     redacted = json.loads(json.dumps(vcon_doc))
 
+    # --- Stronger-than-span rules, applied BEFORE the deny-by-default walk. ---
+    #
+    # (a) parties[].name — HARD-REPLACE. A name is PHI by nature, so it is
+    #     unconditionally replaced with the placeholder for any party that HAS a
+    #     string ``name`` key; span masking is deliberately NOT used here so a
+    #     DetectPHI miss cannot leave a real name behind. ``role`` and every other
+    #     party key, plus the party index/order, are preserved. ``name`` is NOT in
+    #     STRUCTURAL_ALLOWLIST, so leaving it to the generic walk would ALSO mask
+    #     it, but only via span detection — hard-replacing here is the stronger
+    #     guarantee.
+    for party in redacted.get("parties", []):
+        if isinstance(party, dict) and isinstance(party.get("name"), str):
+            party["name"] = REDACTION_PLACEHOLDER
+
+    # (b) recording dialog url — CLEAR. A dialog object with type == 'recording'
+    #     carries an s3:// ``url`` locating the call audio; clear it from the
+    #     de-identified copy so the audio location never rides along, while
+    #     keeping type/start/duration/mimetype/filename and the dialog order.
+    #     (``url`` is NOT allowlisted, but a recording url is an exact location,
+    #     not free text, so it is cleared wholesale rather than span-masked.)
     for turn in redacted.get("dialog", []):
-        if isinstance(turn, dict) and isinstance(turn.get("body"), str):
-            turn["body"] = _redact_text(turn["body"], effective_detect_phi)
+        if (
+            isinstance(turn, dict)
+            and turn.get("type") == "recording"
+            and isinstance(turn.get("url"), str)
+        ):
+            turn["url"] = REDACTION_PLACEHOLDER
 
-    for entry in redacted.get("analysis", []):
-        if not isinstance(entry, dict):
-            continue
-        body = entry.get("body")
-        if isinstance(body, str):
-            entry["body"] = _redact_text(body, effective_detect_phi)
-        elif isinstance(body, list):
-            # entities body: a list of {category, text, score?} dicts.
-            entry["body"] = _redact_entities(body, effective_detect_phi)
+    # --- The top-level ``redacted`` pointer subtree is linkage, not PHI. ---
+    # Detach it so the deny-by-default walk never masks its uuid/type/url/
+    # content_hash (a consumer follows these back to the full signed copy), then
+    # reattach it verbatim after the walk.
+    redacted.pop("redacted", None)
 
-    # The redacted copy carries the pointer back to the full signed version.
+    # --- DENY-BY-DEFAULT: mask every non-allowlisted free-text string. ---
+    # This subsumes the former explicit per-field passes: the dialog ``body``,
+    # analysis ``body`` (str), entity ``text``, and the authoritative transcript
+    # ``turns[].text`` are all reached by the walk and masked with the SAME PHI
+    # coverage (regex + injected spans) as before — masking is idempotent, so the
+    # effect on those fields is unchanged — while subject, consent ``script`` and
+    # any future free-text field are now covered too.
+    _redact_free_text_strings(redacted, effective_detect_phi, key=None)
+
+    # The redacted copy carries the pointer back to the full signed version
+    # (reattached verbatim, untouched by the walk above).
     redacted["redacted"] = dict(full_reference)
     return redacted
 

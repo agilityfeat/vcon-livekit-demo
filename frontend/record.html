@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<!--
+  Record detail page with a doctor/analyst toggle.
+
+  The toggle switches which backend endpoint's JSON is shown:
+    * Doctor   -> GET /api/records/{run}/full      (decrypted + verified full vCon)
+    * Analyst  -> GET /api/records/{run}/redacted   (verified redacted vCon)
+  The backend already did ALL the JOSE (decrypt + verify) server-side, so this
+  page NEVER touches keys or crypto -- it just renders readable vCon JSON.
+
+  Doctor view: the salvaged rendering plus the medication->audio provenance
+  seek (click a MEDICATION entity to jump the audio to the dialog turn it was
+  mentioned in), with the recording streamed from a short-lived presigned URL.
+  Analyst view: the redacted record led by a "De-identified — PHI masked"
+  headline with [REDACTED] tokens highlighted inline; the full<->redacted
+  "same vCon" linkage proof (uuids, pointer type, content_hash) is demoted into
+  a collapsed verification section, and the full copy's s3:// url is NOT
+  surfaced (only labeled as an encrypted, inaccessible reference). The full
+  recording audio is withheld from this view.
+
+  🩹 Demo shortcut: no auth; the doctor/analyst "role" is this client-side
+  toggle, so anyone can see either view. → Production: role-gated, audit-logged
+  access with the full (decrypted) view restricted to authorized clinicians.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Record &middot; vCon Care</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="app-brand">
+      <span class="logo">🩺</span>
+      <h1>vCon Care</h1>
+      <span class="product-tag">intake &middot; records &middot; review</span>
+    </div>
+    <nav class="app-nav" aria-label="Primary">
+      <a href="index.html" data-page="index">Start call</a>
+      <a href="records.html" data-page="records">Records</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h2>Call record</h2>
+      <p id="run-label" class="note"></p>
+    </section>
+
+    <div class="view-toggle" role="group" aria-label="View as">
+      <span class="toggle-label">View as:</span>
+      <button id="view-doctor-btn" type="button" class="active" aria-pressed="true">Doctor (full)</button>
+      <button id="view-analyst-btn" type="button" aria-pressed="false">Analyst (redacted)</button>
+    </div>
+
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+
+    <div id="viewer" hidden>
+      <!-- Same-vCon linkage banner (analyst view only). -->
+      <section id="link-banner" class="link-banner" hidden></section>
+
+      <section class="panel" id="meta-panel">
+        <h2>Record</h2>
+        <dl id="meta" class="meta-grid"></dl>
+      </section>
+
+      <!--
+        Call audio (doctor-view only). The recording is the un-redacted audio,
+        so record.js hides this entire #audio-panel section in the analyst
+        (de-identified) view; it is only rendered/played in the doctor view.
+      -->
+      <section class="panel" id="audio-panel">
+        <h2>Call audio</h2>
+        <audio id="audio" controls preload="none"></audio>
+        <p id="audio-note" class="note"></p>
+      </section>
+
+      <section class="panel" id="parties-panel">
+        <h2>Parties</h2>
+        <ol id="parties" class="parties"></ol>
+      </section>
+
+      <section class="panel" id="meds-panel">
+        <h2>Extracted medications &amp; conditions</h2>
+        <p class="note">Click a medication to jump the audio to the moment it was mentioned (provenance).</p>
+        <div id="meds" class="chips"></div>
+      </section>
+
+      <section class="panel" id="summary-panel">
+        <h2>Summary</h2>
+        <p id="summary" class="body-text"></p>
+        <p id="summary-prov" class="provenance"></p>
+      </section>
+
+      <!--
+        Clinical transcript (authoritative): the Transcribe Medical transcript
+        carried as an authoritative analysis[] entry. This is the clinical-grade
+        reading surface, so it leads above the live transcript. When the pipeline
+        up-levels it into structured speaker turns (a `turns` array on the entry)
+        record.js renders a speaker-attributed <ol> list here, mirroring the live
+        transcript; otherwise it falls back to the flat plain-text blob. The
+        <ol> is created in JS, so no extra markup is needed in this container.
+      -->
+      <section class="panel clinical-transcript-panel" id="clinical-transcript-panel">
+        <h2>Clinical transcript (authoritative)</h2>
+        <div id="clinical-transcript-badges" class="clinical-transcript-badges"></div>
+        <div id="clinical-transcript" class="clinical-transcript body-text"></div>
+      </section>
+
+      <!--
+        Live transcript (demoted, for reference): the real-time Deepgram STT
+        dialog turns. Kept as speaker-attributed <li data-turn> items because
+        the medication->audio provenance seek targets those turn indices. It is
+        visually secondary because the authoritative transcript above may differ
+        from (and corrects) the live STT.
+      -->
+      <section class="panel live-transcript-panel" id="transcript-panel">
+        <h2>Live transcript (real-time, for reference)</h2>
+        <p class="note">Real-time speech-to-text captured during the call. Kept for reference; it may differ from the authoritative clinical transcript above.</p>
+        <ol id="dialog" class="dialog"></ol>
+      </section>
+    </div>
+  </main>
+
+  <!-- Pure helpers first (classic script so record.js can use the globals). -->
+  <script src="app.js"></script>
+  <script src="vcon-helpers.js"></script>
+  <script src="record.js"></script>
+</body>
+</html>

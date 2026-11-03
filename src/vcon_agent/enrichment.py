@@ -33,6 +33,13 @@ MEDICATION_CATEGORY = "MEDICATION"
 MEDICAL_CONDITION_CATEGORY = "MEDICAL_CONDITION"
 _KEPT_CATEGORIES = frozenset({MEDICATION_CATEGORY, MEDICAL_CONDITION_CATEGORY})
 
+# The two fixed vCon party indices, defined in src/vcon_agent/vcon.py as
+# AGENT_INDEX = 1 / PATIENT_INDEX = 0. enrichment.py is a dependency-light pure
+# module with NO vcon import, so we re-declare the constants here (kept in sync
+# with vcon.py by convention) rather than importing them.
+AGENT_INDEX = 1
+PATIENT_INDEX = 0
+
 
 def map_turns_by_timestamp_overlap(
     medical_segments: Sequence[Dict[str, Any]],
@@ -111,6 +118,288 @@ def map_turns_by_timestamp_overlap(
                 covered.append(idx)
         mapped.append(covered)
     return mapped
+
+
+def segments_from_transcribe_result(
+    result_json: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Parse a Transcribe Medical result into speaker SEGMENTS.
+
+    Transcribe Medical (with speaker labels enabled) writes a result JSON that
+    carries both a flat transcript AND the structured pieces needed to recover
+    speaker-attributed, timestamped turns:
+
+        {
+          "results": {
+            "transcripts": [{"transcript": "<flat text>"}],
+            "items": [
+              {"start_time": "0.0", "end_time": "0.5",
+               "alternatives": [{"content": "I"}]},
+              ...
+              {"type": "punctuation", "alternatives": [{"content": "."}]},
+            ],
+            "speaker_labels": {
+              "segments": [
+                {"speaker_label": "spk_0", "start_time": "0.0",
+                 "end_time": "1.2", "items": [...]},
+                ...
+              ]
+            }
+          }
+        }
+
+    This returns one dict per ``results.speaker_labels.segments[]`` entry, each
+    shaped ``{'speaker': 'spk_0'|'spk_1'|..., 'start': <float sec>,
+    'end': <float sec>, 'text': <str>}``. The segment ``text`` is rebuilt by
+    walking ``results.items[]`` and keeping the WORD items whose timestamps fall
+    inside the segment's [start, end] window:
+
+      * a WORD item carries ``start_time``/``end_time`` (coerced via
+        :func:`_as_float`); words join with a single space;
+      * a PUNCTUATION item has ``type == 'punctuation'`` and no timestamps, and
+        is attached to the PRECEDING word WITHOUT a leading space;
+      * each item's surface text is ``alternatives[0].content``.
+
+    Robustness / fallbacks:
+      * if ``results.speaker_labels`` is missing or has no segments, fall back to
+        a SINGLE ``{'speaker': 'spk_0', 'start': None, 'end': None, 'text': <flat
+        transcript>}`` segment (from :func:`transcript_text_from_transcribe_result`);
+      * if ``results.items`` is missing but a speaker segment exists, use the flat
+        transcript text as a last resort for that segment's text.
+
+    Pure, deterministic, dependency-free so a canned Transcribe-shaped dict makes
+    every path testable offline.
+
+    🩹 Shortcut: segment text is reconstructed by bucketing word items into each
+    speaker segment's [start, end] window and gluing punctuation onto the prior
+    word. → Production: true word-level alignment plus robust diarization /
+    channel separation (or let AWS HealthScribe emit speaker-attributed clinical
+    turns directly) rather than reassembling from the batch result here.
+    """
+    results = result_json.get("results") or {}
+    speaker_labels = results.get("speaker_labels") or {}
+    segments = speaker_labels.get("segments") or []
+    items = results.get("items") or []
+
+    flat_text = transcript_text_from_transcribe_result(result_json)
+
+    # Fallback: no diarization available -> one segment with the flat transcript.
+    if not segments:
+        return [{"speaker": "spk_0", "start": None, "end": None, "text": flat_text}]
+
+    # Precompute (start, end, content, is_punctuation) for every item once. Only
+    # word items (those carrying a numeric start) can be bucketed into a segment
+    # window; punctuation rides along with its preceding word.
+    parsed_items: List[Dict[str, Any]] = []
+    for item in items:
+        alternatives = item.get("alternatives") or []
+        content = alternatives[0].get("content") if alternatives else ""
+        is_punct = item.get("type") == "punctuation"
+        start = _as_float(item.get("start_time"))
+        end = _as_float(item.get("end_time"))
+        parsed_items.append(
+            {
+                "start": start,
+                "end": end,
+                "content": content or "",
+                "is_punct": is_punct,
+            }
+        )
+
+    out: List[Dict[str, Any]] = []
+    for seg in segments:
+        speaker = seg.get("speaker_label", "spk_0")
+        seg_start = _as_float(seg.get("start_time"))
+        seg_end = _as_float(seg.get("end_time"))
+
+        # Collect the word items whose [start, end] falls inside this segment's
+        # window, attaching any punctuation that immediately follows a kept word.
+        text = ""
+        if parsed_items and seg_start is not None and seg_end is not None:
+            text = _text_for_window(parsed_items, seg_start, seg_end)
+
+        # Last resort: a segment exists but no items were bucketed into it (items
+        # missing, or no numeric window). Use the flat transcript text.
+        if not text:
+            text = flat_text
+
+        out.append(
+            {
+                "speaker": speaker,
+                "start": seg_start,
+                "end": seg_end,
+                "text": text,
+            }
+        )
+    return out
+
+
+def _text_for_window(
+    parsed_items: Sequence[Dict[str, Any]],
+    seg_start: float,
+    seg_end: float,
+) -> str:
+    """Join the word items whose timing falls in [seg_start, seg_end].
+
+    Words join with a single space; a punctuation item (no timestamps) is glued
+    onto the immediately preceding kept word with no leading space. Punctuation
+    is only kept when the word right before it was kept (so trailing punctuation
+    of a different segment's word never leaks in).
+    """
+    pieces: List[str] = []
+    kept_previous_word = False
+    for item in parsed_items:
+        if item["is_punct"]:
+            # Attach to the preceding word only if that word was kept.
+            if kept_previous_word and pieces:
+                pieces[-1] = pieces[-1] + item["content"]
+            continue
+        start = item["start"]
+        end = item["end"]
+        if start is None:
+            kept_previous_word = False
+            continue
+        # A word belongs to the segment when its start falls within the window.
+        # Using end (falling back to start) keeps a word that ends exactly at the
+        # boundary.
+        word_end = end if end is not None else start
+        if seg_start <= start and word_end <= seg_end:
+            pieces.append(item["content"])
+            kept_previous_word = True
+        else:
+            kept_previous_word = False
+    return " ".join(pieces).strip()
+
+
+def reconcile_segments_to_parties(
+    medical_segments: Sequence[Dict[str, Any]],
+    dialog_turns: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Reconcile Transcribe speaker segments to the fixed party indices BY ORDER.
+
+    Takes the speaker SEGMENTS produced by
+    :func:`segments_from_transcribe_result` (each ``{'speaker', 'start', 'end',
+    'text'}``) and returns one structured TURN per segment, shaped
+    ``{'party': <int|None>, 'speaker': 'spk_0'|..., 'start': <float|None>,
+    'end': <float|None>, 'text': <str>}``, preserving speaker/start/end/text
+    EXACTLY. Only HOW each segment's ``party`` is assigned changes here.
+
+    WHY ORDER AND NOT TIME OVERLAP: the medical-transcript segment times are
+    seconds-from-RECORDING-start (they begin at 0.0), while the live dialog-turn
+    ``start`` values are seconds-from-SESSION-connect (relative to
+    ``session_start_iso``). The two clocks have DIFFERENT ORIGINS, so overlapping
+    segment times against dialog-turn times resolved confidently WRONG (it
+    collapsed every speaker onto party 0, rendering every authoritative-transcript
+    turn as 'Patient'). Instead we trust Transcribe's own (clean) diarization and
+    map its ``spk_N`` labels to roles by SPEAKING ORDER, using the scripted
+    'agent speaks first' invariant: the scripted intake bot (agent) opens the call
+    with the consent script, so the speaker label whose FIRST segment starts
+    earliest is the AGENT.
+
+    Algorithm (``dialog_turns`` is intentionally NOT read; see below):
+      1. For each distinct speaker label, find the START (``seg['start']``,
+         coerced via :func:`_as_float`) of that label's FIRST (earliest-start)
+         segment. A label whose first start is ``None``/unorderable has no
+         determinable position in the order.
+      2. Order the distinct labels by that first-segment start ascending.
+      3. Exactly 1 distinct label -> map it to ``None`` (diarization collapsed to
+         a single speaker; do NOT guess agent vs. patient -- the viewer shows a
+         generic 'Speaker N').
+      4. Exactly 2 distinct labels with distinct first-starts -> earliest is the
+         AGENT (:data:`AGENT_INDEX` = 1), the other is the PATIENT
+         (:data:`PATIENT_INDEX` = 0).
+      5. More than 2 distinct labels -> map the single earliest label to AGENT (1)
+         and ALL other distinct labels to PATIENT (0). This is a reasonable choice
+         for a scripted two-party intake where only the agent should open; it is
+         documented here rather than guessing a richer mapping.
+      6. A tie on the earliest first-start (two labels share the same earliest
+         instant), or any label whose first start is ``None``/unorderable, maps to
+         ``None`` rather than guessing.
+
+    ``dialog_turns`` is accepted for signature compatibility (the caller, the
+    inline Merge mirror, and the tests all pass it) but is intentionally IGNORED
+    by this order-based mapping -- party is derived purely from the Transcribe
+    segment order. :data:`AGENT_INDEX` (1) / :data:`PATIENT_INDEX` (0) come from
+    src/vcon_agent/vcon.py.
+
+    🩹 Shortcut: role attribution rides the scripted 'agent speaks first'
+    invariant. → Production: channel separation (agent and patient on separate
+    audio channels) or robust diarization + speaker identity, rather than
+    inferring role from speaking order.
+
+    Pure, deterministic, dependency-free.
+    """
+    # First-segment start per distinct label, preserving first-seen label order
+    # as a stable tiebreaker-free record (we detect ties explicitly below).
+    first_start: Dict[str, Optional[float]] = {}
+    for seg in medical_segments:
+        speaker = seg.get("speaker", "spk_0")
+        start = _as_float(seg.get("start"))
+        if speaker not in first_start:
+            first_start[speaker] = start
+        else:
+            existing = first_start[speaker]
+            if start is not None and (existing is None or start < existing):
+                first_start[speaker] = start
+
+    label_to_party = _order_labels_to_parties(first_start)
+
+    turns: List[Dict[str, Any]] = []
+    for seg in medical_segments:
+        speaker = seg.get("speaker", "spk_0")
+        turns.append(
+            {
+                "party": label_to_party.get(speaker),
+                "speaker": speaker,
+                "start": seg.get("start"),
+                "end": seg.get("end"),
+                "text": seg.get("text", ""),
+            }
+        )
+    return turns
+
+
+def _order_labels_to_parties(
+    first_start: Dict[str, Optional[float]],
+) -> Dict[str, Optional[int]]:
+    """Map distinct speaker labels to party indices by first-segment start.
+
+    Earliest orderable label -> AGENT_INDEX (1); with exactly two labels the
+    other -> PATIENT_INDEX (0); with more than two, every non-earliest label ->
+    PATIENT_INDEX (0). A single label, a label with no usable numeric start, or a
+    tie on the earliest instant -> None (we do not guess).
+    """
+    label_to_party: Dict[str, Optional[int]] = {label: None for label in first_start}
+
+    # A single distinct label cannot establish an order -> leave it None.
+    if len(first_start) < 2:
+        return label_to_party
+
+    orderable = {
+        label: start for label, start in first_start.items() if start is not None
+    }
+    if not orderable:
+        return label_to_party
+
+    earliest_start = min(orderable.values())
+    earliest_labels = [
+        label for label, start in orderable.items() if start == earliest_start
+    ]
+    # A tie on the earliest first-start is unorderable -> do not guess.
+    if len(earliest_labels) != 1:
+        return label_to_party
+
+    agent_label = earliest_labels[0]
+    for label in first_start:
+        if label == agent_label:
+            label_to_party[label] = AGENT_INDEX
+        elif first_start[label] is not None:
+            # The other orderable label(s) are the patient. For >2 labels this
+            # collapses every non-earliest label onto PATIENT_INDEX (documented
+            # choice for a scripted two-party intake).
+            label_to_party[label] = PATIENT_INDEX
+        # Labels with no usable numeric start stay None (unorderable).
+    return label_to_party
 
 
 def extract_min_entities(comprehend_response: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -220,6 +509,31 @@ def s3_location_from_transcribe_uri(uri: str) -> Optional[tuple]:
     return None
 
 
+# The physician-summary instruction + framing is defined ONCE here and reused by
+# both prompt builders (dialog-sourced and transcript-sourced) so the wording
+# cannot drift between them. Keep this byte-identical to the inline mirror in
+# infrastructure/template.yaml's BedrockFunction body.
+_SUMMARY_INSTRUCTION = (
+    "You are a clinical documentation assistant. Write a concise, factual "
+    "physician-facing summary of the following patient intake conversation. "
+    "Include the chief complaint, duration, and any medications mentioned. "
+    "Do not add diagnoses or recommendations."
+)
+
+
+def _summary_prompt(transcript: str) -> str:
+    """Wrap a transcript body between the shared instruction and the 'Summary:'
+    marker. The single framing both builders share, so the exact wording is
+    defined once.
+    """
+    return (
+        f"{_SUMMARY_INSTRUCTION}\n\n"
+        "Conversation:\n"
+        f"{transcript}\n\n"
+        "Summary:"
+    )
+
+
 def summary_prompt_from_dialog(dialog_turns: Sequence[Dict[str, Any]]) -> str:
     """Build the Bedrock physician-summary prompt from the dialog turns.
 
@@ -241,15 +555,36 @@ def summary_prompt_from_dialog(dialog_turns: Sequence[Dict[str, Any]]) -> str:
         body = turn.get("body", "")
         lines.append(f"{speaker}: {body}")
     transcript = "\n".join(lines)
-    return (
-        "You are a clinical documentation assistant. Write a concise, factual "
-        "physician-facing summary of the following patient intake conversation. "
-        "Include the chief complaint, duration, and any medications mentioned. "
-        "Do not add diagnoses or recommendations.\n\n"
-        "Conversation:\n"
-        f"{transcript}\n\n"
-        "Summary:"
-    )
+    return _summary_prompt(transcript)
+
+
+def summary_prompt_from_transcript(transcript_text: str) -> str:
+    """Build the Bedrock physician-summary prompt from the AUTHORITATIVE transcript.
+
+    Takes the single transcript string produced by
+    ``transcript_text_from_transcribe_result`` (the Transcribe Medical result
+    stored authoritative in analysis[]) and wraps it with the SAME
+    physician-summary instruction used by ``summary_prompt_from_dialog``. The
+    body is presented as the clinical transcript text verbatim: no fabricated
+    Patient/Agent speaker labels, because the authoritative blob does not carry
+    speaker attribution. Pure and deterministic so the exact prompt is testable.
+
+    Why source the summary from the authoritative transcript instead of the live
+    dialog turns? The live (Deepgram) transcript can mis-hear clinical terms
+    (e.g. a medication name heard as a common word), and summarizing from it
+    propagates that error. Transcribe Medical captures those terms correctly, so
+    the clinical artifact (the summary) is built from the clinically-accurate
+    source.
+
+    🩹 Shortcut → Production: summarizing from the authoritative transcript blob
+    is clinically correct for terms like medication names, but it LOSES the clean
+    speaker attribution the live dialog turns provide (the blob is one
+    undifferentiated string). Production should reconcile the diarized medical
+    transcript with the live turns to get BOTH speaker structure AND clinical
+    accuracy, e.g. via the existing ``map_turns_by_timestamp_overlap`` helper
+    (unit-tested but intentionally not wired into the demo).
+    """
+    return _summary_prompt(transcript_text)
 
 
 def summary_text_from_bedrock_response(response: Dict[str, Any]) -> str:

@@ -40,12 +40,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .config import ENV_AWS_REGION, ENV_BUCKET_NAME, ENV_STATE_MACHINE_ARN
 from .vcon import execution_name, run_key
-
-# Environment variable names (map of CloudFormation Outputs -> local .env).
-ENV_BUCKET_NAME = "BUCKET_NAME"
-ENV_STATE_MACHINE_ARN = "STATE_MACHINE_ARN"
-ENV_AWS_REGION = "AWS_REGION"
 
 # Directory used by the local-file fallback when BUCKET_NAME is unset.
 LOCAL_OUTPUT_DIR = "vcon-output"

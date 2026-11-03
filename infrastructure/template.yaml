@@ -87,6 +87,17 @@ Parameters:
       Override at deploy time with --parameter-overrides to pin a different
       model or a geo profile (e.g. us.anthropic.claude-haiku-5-5).
 
+  VconSigningPrivateJwk:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: >-
+      Shared JWS/JWE demo signing key for the Seal step: a JWK JSON document or
+      a PEM string. It MUST match the backend's .env VCON_SIGNING_PRIVATE_JWK so
+      the backend can decrypt/verify the records the Seal step produces. Leaving
+      it empty makes the Seal step generate an ephemeral per-invocation key
+      whose sealed records can never be decrypted or verified by the backend.
+
 Resources:
 
   # ---------------------------------------------------------------------------
@@ -419,6 +430,55 @@ Resources:
               "Patient reports a headache for three days and is taking ibuprofen."
           )
 
+          # 🩹 Demo stub: a canned Transcribe-Medical-shaped result that carries
+          # the SAME sentence as _CANNED_TRANSCRIPT but split across two speakers
+          # (spk_0 / spk_1) with word-level timings and a speaker_labels block, so
+          # the no-recording path still exercises the structured segments ->
+          # reconciliation -> turns flow end to end offline. GetTranscription's
+          # canned path turns this into transcript_segments; transcript_text stays
+          # _CANNED_TRANSCRIPT verbatim so the summary/comprehend source is
+          # unchanged. → Production: a real Transcribe Medical result (or AWS
+          # HealthScribe) with real diarized, timestamped segments.
+          _CANNED_TRANSCRIBE_RESULT = {
+              "results": {
+                  "transcripts": [{"transcript": _CANNED_TRANSCRIPT}],
+                  "items": [
+                      {"start_time": "0.0", "end_time": "0.4",
+                       "alternatives": [{"content": "Patient"}]},
+                      {"start_time": "0.4", "end_time": "0.7",
+                       "alternatives": [{"content": "reports"}]},
+                      {"start_time": "0.7", "end_time": "0.9",
+                       "alternatives": [{"content": "a"}]},
+                      {"start_time": "0.9", "end_time": "1.3",
+                       "alternatives": [{"content": "headache"}]},
+                      {"start_time": "1.3", "end_time": "1.6",
+                       "alternatives": [{"content": "for"}]},
+                      {"start_time": "1.6", "end_time": "1.9",
+                       "alternatives": [{"content": "three"}]},
+                      {"start_time": "1.9", "end_time": "2.3",
+                       "alternatives": [{"content": "days"}]},
+                      {"start_time": "2.3", "end_time": "2.6",
+                       "alternatives": [{"content": "and"}]},
+                      {"start_time": "2.6", "end_time": "2.8",
+                       "alternatives": [{"content": "is"}]},
+                      {"start_time": "2.8", "end_time": "3.2",
+                       "alternatives": [{"content": "taking"}]},
+                      {"start_time": "3.2", "end_time": "3.8",
+                       "alternatives": [{"content": "ibuprofen"}]},
+                      {"type": "punctuation",
+                       "alternatives": [{"content": "."}]},
+                  ],
+                  "speaker_labels": {
+                      "segments": [
+                          {"speaker_label": "spk_0", "start_time": "0.0",
+                           "end_time": "1.3"},
+                          {"speaker_label": "spk_1", "start_time": "1.3",
+                           "end_time": "3.8"},
+                      ]
+                  },
+              }
+          }
+
 
           def handler(event, context):
               vcon = event.get("vcon", event)
@@ -441,6 +501,18 @@ Resources:
                           Type="CONVERSATION",
                           Media={"MediaFileUri": "s3://{}/{}".format(bucket, key)},
                           OutputBucketName=bucket,
+                          # Request diarization so the result JSON carries
+                          # speaker_labels.segments (spk_0 = patient, spk_1 =
+                          # agent, reconciled downstream). MaxSpeakerLabels must be
+                          # >= 2 for the two-party intake call. NOTE: the exact
+                          # Settings shape for the MEDICAL transcription API must
+                          # be verified against a live job; if the medical API
+                          # uses a different key, swap to the documented medical
+                          # key here.
+                          Settings={
+                              "ShowSpeakerLabels": True,
+                              "MaxSpeakerLabels": 2,
+                          },
                       )
                       return {
                           "vcon": vcon,
@@ -463,7 +535,10 @@ Resources:
                           )
                       )
 
-              # Canned-transcript stub path.
+              # Canned-transcript stub path. Carry both the flat canned text
+              # (for transcript_text) and the canned Transcribe-shaped result
+              # (which GetTranscription parses into transcript_segments) so the
+              # structured turns path runs end to end offline.
               return {
                   "vcon": vcon,
                   "step": "start-transcription",
@@ -471,6 +546,7 @@ Resources:
                   "job_name": job_name,
                   "canned": True,
                   "canned_transcript": _CANNED_TRANSCRIPT,
+                  "canned_result": _CANNED_TRANSCRIBE_RESULT,
                   "transcription_canned_reason": canned_reason,
               }
       Tags:
@@ -527,6 +603,103 @@ Resources:
               return " ".join(parts).strip()
 
 
+          def _as_float(value):
+              # Mirror of enrichment._as_float: numeric/numeric-string -> float,
+              # ISO strings (and everything else) -> None.
+              if value is None or isinstance(value, bool):
+                  return None
+              if isinstance(value, (int, float)):
+                  return float(value)
+              if isinstance(value, str):
+                  try:
+                      return float(value)
+                  except ValueError:
+                      return None
+              return None
+
+
+          def _text_for_window(parsed_items, seg_start, seg_end):
+              # Mirror of enrichment._text_for_window: join the word items whose
+              # timing falls in [seg_start, seg_end]; punctuation (no timestamps)
+              # glues onto the preceding kept word with no leading space.
+              pieces = []
+              kept_previous_word = False
+              for item in parsed_items:
+                  if item["is_punct"]:
+                      if kept_previous_word and pieces:
+                          pieces[-1] = pieces[-1] + item["content"]
+                      continue
+                  start = item["start"]
+                  end = item["end"]
+                  if start is None:
+                      kept_previous_word = False
+                      continue
+                  word_end = end if end is not None else start
+                  if seg_start <= start and word_end <= seg_end:
+                      pieces.append(item["content"])
+                      kept_previous_word = True
+                  else:
+                      kept_previous_word = False
+              return " ".join(pieces).strip()
+
+
+          def _segments_from_transcribe_result(result_json):
+              # Mirror of enrichment.segments_from_transcribe_result: one dict per
+              # results.speaker_labels.segments[] entry
+              # ({'speaker','start','end','text'}), text rebuilt by bucketing the
+              # results.items[] word items into each segment's [start,end] window.
+              # Falls back to a single spk_0 flat-transcript segment when
+              # speaker_labels is missing/empty.
+              results = result_json.get("results") or {}
+              speaker_labels = results.get("speaker_labels") or {}
+              segments = speaker_labels.get("segments") or []
+              items = results.get("items") or []
+
+              flat_text = _transcript_text_from_transcribe_result(result_json)
+
+              if not segments:
+                  return [
+                      {"speaker": "spk_0", "start": None, "end": None,
+                       "text": flat_text}
+                  ]
+
+              parsed_items = []
+              for item in items:
+                  alternatives = item.get("alternatives") or []
+                  content = alternatives[0].get("content") if alternatives else ""
+                  is_punct = item.get("type") == "punctuation"
+                  start = _as_float(item.get("start_time"))
+                  end = _as_float(item.get("end_time"))
+                  parsed_items.append(
+                      {
+                          "start": start,
+                          "end": end,
+                          "content": content or "",
+                          "is_punct": is_punct,
+                      }
+                  )
+
+              out = []
+              for seg in segments:
+                  speaker = seg.get("speaker_label", "spk_0")
+                  seg_start = _as_float(seg.get("start_time"))
+                  seg_end = _as_float(seg.get("end_time"))
+                  text = ""
+                  if parsed_items and seg_start is not None and seg_end is not None:
+                      text = _text_for_window(parsed_items, seg_start, seg_end)
+                  if not text:
+                      text = flat_text
+                  out.append(
+                      {
+                          "speaker": speaker,
+                          "start": seg_start,
+                          "end": seg_end,
+                          "text": text,
+                      }
+                  )
+              return out
+
+
           def _s3_location_from_transcribe_uri(uri):
               if not isinstance(uri, str) or not uri:
                   return None
@@ -565,6 +738,16 @@ Resources:
               # report COMPLETED immediately with the canned text. → Production:
               # always poll the real job.
               if event.get("canned"):
+                  # Derive structured segments from the canned Transcribe-shaped
+                  # fixture carried by StartTranscription, keeping transcript_text
+                  # exactly the canned flat string so the summary/comprehend
+                  # source is unchanged.
+                  canned_result = event.get("canned_result") or {}
+                  canned_segments = (
+                      _segments_from_transcribe_result(canned_result)
+                      if canned_result
+                      else []
+                  )
                   return {
                       "vcon": vcon,
                       "step": "get-transcription",
@@ -572,11 +755,13 @@ Resources:
                       "job_name": event.get("job_name"),
                       "transcription_status": "COMPLETED",
                       "transcript_text": event.get("canned_transcript", ""),
+                      "transcript_segments": canned_segments,
                   }
 
               job_name = event.get("job_name")
               status = "FAILED"
               transcript_text = ""
+              transcript_segments = []
               try:
                   resp = _TRANSCRIBE.get_medical_transcription_job(
                       MedicalTranscriptionJobName=job_name
@@ -593,6 +778,12 @@ Resources:
                           transcript_text = _transcript_text_from_transcribe_result(
                               result_json
                           )
+                          # Parse speaker-labeled, timestamped segments from the
+                          # same result JSON and carry them ALONGSIDE the
+                          # unchanged transcript_text.
+                          transcript_segments = _segments_from_transcribe_result(
+                              result_json
+                          )
               except Exception:
                   status = "IN_PROGRESS"
 
@@ -605,6 +796,7 @@ Resources:
               }
               if status == "COMPLETED":
                   out["transcript_text"] = transcript_text
+                  out["transcript_segments"] = transcript_segments
               return out
       Tags:
         - Key: Project
@@ -700,6 +892,10 @@ Resources:
                   "entities": entities,
                   "entities_dialog_index": _first_patient_turn_index(vcon),
                   "transcript_text": transcript_text,
+                  # Re-emit verbatim so Step Functions carries the structured
+                  # segments from GetTranscription through to Merge (passed over
+                  # unchanged; only Merge reconciles them).
+                  "transcript_segments": event.get("transcript_segments"),
                   "entities_degraded": degraded,
               }
       Tags:
@@ -730,10 +926,26 @@ Resources:
           BEDROCK_MODEL_ID: !Ref BedrockModelId
       Code:
         ZipFile: |
-          # Bedrock: produce a physician-facing summary of the dialog.
-          # summary_prompt_from_dialog + summary_text_from_bedrock_response are
-          # mirrored from enrichment.py so the shaping is identical to the
+          # Bedrock: produce a physician-facing summary from the AUTHORITATIVE
+          # Transcribe Medical transcript (the transcript_text this branch
+          # receives in its event), NOT the live Deepgram dialog[] turns.
+          # summary_prompt_from_transcript + summary_text_from_bedrock_response
+          # are mirrored from enrichment.py so the shaping is identical to the
           # offline-tested pure copy.
+          #
+          # Why the authoritative transcript? The live transcript can mis-hear
+          # clinical terms (e.g. a medication name heard as a common word), and
+          # summarizing from it propagates the error; Transcribe Medical captures
+          # those terms correctly, so the clinical artifact is built from the
+          # clinically-accurate source.
+          #
+          # 🩹 Shortcut → Production: summarizing from the authoritative blob is
+          # clinically correct for medication names but LOSES the clean speaker
+          # attribution the live dialog turns provide (the blob is one
+          # undifferentiated string). Production should reconcile the diarized
+          # medical transcript with the live turns to get BOTH speaker structure
+          # AND clinical accuracy (see map_turns_by_timestamp_overlap in
+          # enrichment.py, unit-tested but intentionally not wired into the demo).
           #
           # Unwrap convention: one event.get("vcon", event) yields the vCon doc.
           import json
@@ -745,26 +957,16 @@ Resources:
           _BEDROCK = boto3.client("bedrock-runtime")
 
 
-          def _summary_prompt_from_dialog(dialog_turns):
-              lines = []
-              for turn in dialog_turns:
-                  if turn.get("type") != "text":
-                      continue
-                  party = turn.get("party")
-                  speaker = (
-                      "Patient" if party == 0
-                      else "Agent" if party == 1
-                      else "Unknown"
-                  )
-                  lines.append("{}: {}".format(speaker, turn.get("body", "")))
-              transcript = "\n".join(lines)
+          def _summary_prompt_from_transcript(transcript_text):
+              # Present the authoritative transcript verbatim; do NOT fabricate
+              # Patient/Agent labels the blob does not carry.
               return (
                   "You are a clinical documentation assistant. Write a concise, "
                   "factual physician-facing summary of the following patient "
                   "intake conversation. Include the chief complaint, duration, "
                   "and any medications mentioned. Do not add diagnoses or "
                   "recommendations.\n\nConversation:\n"
-                  + transcript
+                  + transcript_text
                   + "\n\nSummary:"
               )
 
@@ -804,7 +1006,12 @@ Resources:
 
           def handler(event, context):
               vcon = event.get("vcon", event)
-              prompt = _summary_prompt_from_dialog(vcon.get("dialog", []))
+              # Build the prompt from the AUTHORITATIVE Transcribe Medical
+              # transcript text that the Analyze Parallel state passes to this
+              # branch (the same transcript_text the Comprehend branch reads),
+              # NOT from the live dialog[] turns.
+              transcript_text = event.get("transcript_text", "") or ""
+              prompt = _summary_prompt_from_transcript(transcript_text)
 
               summary_text = ""
               # 🩹 Fail-open for demo-runnability: if Bedrock is unavailable
@@ -844,6 +1051,10 @@ Resources:
                   "recording_key": event.get("recording_key"),
                   "summary_text": summary_text,
                   "summary_dialog_indices": _dialog_indices(vcon),
+                  # Re-emit verbatim so Step Functions carries the structured
+                  # segments through this Analyze branch to Merge (unchanged;
+                  # only Merge reconciles them).
+                  "transcript_segments": event.get("transcript_segments"),
                   "summary_degraded": degraded,
               }
       Tags:
@@ -898,6 +1109,105 @@ Resources:
               ]
 
 
+          def _as_float(value):
+              # Mirror of enrichment._as_float: numeric/numeric-string -> float,
+              # ISO strings (and everything else) -> None (so ISO dialog starts
+              # are skipped by the overlap mapping below).
+              if value is None or isinstance(value, bool):
+                  return None
+              if isinstance(value, (int, float)):
+                  return float(value)
+              if isinstance(value, str):
+                  try:
+                      return float(value)
+                  except ValueError:
+                      return None
+              return None
+
+
+          # The two fixed vCon party indices (from vcon.py): AGENT_INDEX = 1 /
+          # PATIENT_INDEX = 0. Re-declared inline (no imports available here).
+          AGENT_INDEX = 1
+          PATIENT_INDEX = 0
+
+
+          def _order_labels_to_parties(first_start):
+              # Mirror of enrichment._order_labels_to_parties: earliest orderable
+              # label -> AGENT_INDEX (1); with exactly two labels the other ->
+              # PATIENT_INDEX (0); with more than two, every non-earliest label ->
+              # PATIENT_INDEX (0). A single label, an unorderable (None) start, or
+              # a tie on the earliest instant -> None (we do not guess).
+              label_to_party = {label: None for label in first_start}
+              if len(first_start) < 2:
+                  return label_to_party
+              orderable = {
+                  label: start
+                  for label, start in first_start.items()
+                  if start is not None
+              }
+              if not orderable:
+                  return label_to_party
+              earliest_start = min(orderable.values())
+              earliest_labels = [
+                  label
+                  for label, start in orderable.items()
+                  if start == earliest_start
+              ]
+              if len(earliest_labels) != 1:
+                  return label_to_party
+              agent_label = earliest_labels[0]
+              for label in first_start:
+                  if label == agent_label:
+                      label_to_party[label] = AGENT_INDEX
+                  elif first_start[label] is not None:
+                      label_to_party[label] = PATIENT_INDEX
+              return label_to_party
+
+
+          def _reconcile_segments_to_parties(medical_segments, dialog_turns):
+              # Mirror of enrichment.reconcile_segments_to_parties: one structured
+              # turn per segment ({'party','speaker','start','end','text'}),
+              # preserving speaker/start/end/text exactly. Party is assigned BY
+              # SPEAKING ORDER, NOT by time overlap: the medical-segment clock
+              # (seconds from recording start) and the live dialog-turn clock
+              # (seconds from session connect) have DIFFERENT origins, so overlap
+              # resolved wrong. Instead we trust Transcribe's diarization and the
+              # scripted 'agent speaks first' invariant: the label whose FIRST
+              # segment starts earliest is the AGENT (1), the other is the PATIENT
+              # (0). One distinct label / ties / unorderable -> None (no guess).
+              # dialog_turns is accepted for signature compatibility and is
+              # intentionally IGNORED by the order-based mapping.
+              # 🩹 Shortcut: relies on the scripted 'agent speaks first'
+              # invariant. -> Production: channel separation or robust
+              # diarization + identity rather than speaking order.
+              first_start = {}
+              for seg in medical_segments:
+                  speaker = seg.get("speaker", "spk_0")
+                  start = _as_float(seg.get("start"))
+                  if speaker not in first_start:
+                      first_start[speaker] = start
+                  else:
+                      existing = first_start[speaker]
+                      if start is not None and (
+                          existing is None or start < existing
+                      ):
+                          first_start[speaker] = start
+              label_to_party = _order_labels_to_parties(first_start)
+              turns = []
+              for seg in medical_segments:
+                  speaker = seg.get("speaker", "spk_0")
+                  turns.append(
+                      {
+                          "party": label_to_party.get(speaker),
+                          "speaker": speaker,
+                          "start": seg.get("start"),
+                          "end": seg.get("end"),
+                          "text": seg.get("text", ""),
+                      }
+                  )
+              return turns
+
+
           def handler(event, context):
               # The Parallel state hands us a list of branch outputs. Be tolerant
               # of also receiving a single envelope.
@@ -922,17 +1232,36 @@ Resources:
               transcript_text = comprehend.get("transcript_text", "") or ""
               covered = _text_dialog_indices(vcon)
 
-              # 1) transcript (authoritative clinical transcript, dual-transcript).
-              vcon["analysis"].append(
-                  {
-                      "type": "transcript",
-                      "vendor": "aws-transcribe-medical",
-                      "authoritative": True,
-                      "dialog": covered,
-                      "body": transcript_text,
-                      "mimetype": "text/plain",
-                  }
+              # Structured speaker segments thread through from GetTranscription
+              # via whichever Analyze branch re-emitted them. When present, build
+              # speaker-attributed turns by reconciling them to the party indices
+              # BY SPEAKING ORDER (agent speaks first); party resolves to None
+              # (spk label only) for a single speaker / ties / unorderable starts.
+              transcript_segments = (
+                  comprehend.get("transcript_segments")
+                  or bedrock.get("transcript_segments")
+                  or []
               )
+
+              # 1) transcript (authoritative clinical transcript, dual-transcript).
+              transcript_entry = {
+                  "type": "transcript",
+                  "vendor": "aws-transcribe-medical",
+                  "authoritative": True,
+                  "dialog": covered,
+                  "body": transcript_text,
+                  "mimetype": "text/plain",
+              }
+              # Additive: store reconciled structured turns alongside the flat
+              # body ONLY when segments are present, so older segment-less
+              # envelopes still produce the byte-identical flat-only entry.
+              if transcript_segments:
+                  turns = _reconcile_segments_to_parties(
+                      transcript_segments, vcon.get("dialog", [])
+                  )
+                  if turns:
+                      transcript_entry["turns"] = turns
+              vcon["analysis"].append(transcript_entry)
 
               # 2) entities (Comprehend Medical, meds + conditions). A
               # `degraded` marker is attached ONLY when the Comprehend branch
@@ -1016,12 +1345,14 @@ Resources:
         Variables:
           BUCKET_NAME: !Ref RecordingsBucket
           # 🩹 Shortcut: self-signed demo keypair carried in a Lambda env var
-          # (env/local), not a managed key. Left EMPTY here so a demo key is
-          # generated at runtime; a demo deploy may set it to a JWK/PEM string.
-          # → Production: AWS KMS / ACM PCA, key rotation, HSM-backed signing;
-          # never ship keys with the app. (Ties to the AWS-plugin
-          # long-term-credential caveat - #1719.)
-          VCON_SIGNING_PRIVATE_JWK: ''
+          # (env/local), not a managed key. Set from the VconSigningPrivateJwk
+          # CloudFormation parameter; it MUST match the backend's .env
+          # VCON_SIGNING_PRIVATE_JWK or the backend cannot decrypt/verify the
+          # sealed records. Leaving the parameter empty makes the Seal step
+          # generate an ephemeral per-invocation key whose records can never be
+          # read back. → Production: AWS KMS / ACM PCA, key rotation, HSM-backed
+          # signing; never ship keys with the app.
+          VCON_SIGNING_PRIVATE_JWK: !Ref VconSigningPrivateJwk
       Tags:
         Project: !Ref ProjectName
         Environment: !Ref Environment

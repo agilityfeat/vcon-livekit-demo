@@ -17,14 +17,25 @@ dependencies = [
     "python-dotenv>=1.0",
     # JWS/JWE/JWK primitives for signing, encrypting, and the redacted
     # vCon. jwcrypto is a pure-Python JOSE library on top of `cryptography`; the
-    # pure sealing core (src/vcon_agent/sealing.py) imports it at runtime, so it
-    # is a main dependency. Installable on requires-python >=3.9.
+    # pure sealing core (infrastructure/functions/seal/sealing.py) imports it at
+    # runtime, so it is a main dependency. Installable on requires-python >=3.9.
     "jwcrypto>=1.5",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
+]
+# Runtime deps for the local end-to-end demo backend: a FastAPI app served by
+# uvicorn that mints LiveKit patient access tokens and reads/verifies/decrypts
+# the vCon artifacts for the doctor/analyst viewers. livekit-api is the server
+# token/REST SDK (provides livekit.api.AccessToken) and is distinct from the
+# livekit-agents worker SDK in the main deps. python-dotenv is already a main
+# dependency, so it is not repeated here.
+app = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "livekit-api>=0.6",
 ]
 
 [tool.setuptools.packages.find]
