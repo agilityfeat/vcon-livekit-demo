@@ -35,20 +35,24 @@
     <section class="hero">
       <h2>Call records</h2>
       <p>
-        Each completed intake call produces a signed + encrypted vCon record.
-        Open one to review it as a <strong>doctor</strong> (full) or an
+        Each completed intake call produces a signed and encrypted vCon record.
+        Open one to review it as a <strong>doctor</strong> (full detail) or an
         <strong>analyst</strong> (redacted).
       </p>
     </section>
 
     <section class="panel">
-      <p id="status" class="status" role="status" aria-live="polite"></p>
+      <div class="list-head">
+        <h3>Recent intake calls</h3>
+        <p id="status" class="status" role="status" aria-live="polite"></p>
+      </div>
       <ul id="record-list" class="record-list"></ul>
       <div id="empty-state" class="empty-state" hidden>
+        <span class="empty-icon" aria-hidden="true">🗂️</span>
         <p><strong>No records yet.</strong></p>
         <p>
-          <a href="index.html">Place an intake call</a> to create a record. It
-          appears here once the conversation has been processed.
+          <a href="index.html">Place an intake call</a> to create your first
+          record. It appears here once the conversation has been processed.
         </p>
       </div>
     </section>

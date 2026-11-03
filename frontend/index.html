@@ -44,57 +44,73 @@
       <h2>Start your intake call</h2>
       <p>
         You'll speak with our automated intake assistant. The conversation is
-        recorded and transcribed so your care team can review it afterward.
+        securely recorded and transcribed so your care team can review it
+        afterward.
       </p>
     </section>
 
-    <section class="panel">
-      <h3>Call setup</h3>
-      <div class="field-row">
-        <label>
-          Room
-          <input id="room-input" type="text" value="intake" />
-        </label>
-        <label>
-          Your name
-          <input id="name-input" type="text" placeholder="Your name" />
-        </label>
-      </div>
+    <div class="call-layout">
+      <!-- Primary intake call card: the focused "click to call" surface. -->
+      <section class="panel call-card">
+        <div class="field-row">
+          <label>
+            Room
+            <input id="room-input" type="text" value="intake" />
+          </label>
+          <label>
+            Your name
+            <input id="name-input" type="text" placeholder="Your name" />
+          </label>
+        </div>
 
-      <div class="call-controls">
-        <button id="start-call-btn" class="btn-primary" type="button">Start call</button>
-        <button id="end-call-btn" class="btn-danger" type="button" hidden>End call</button>
-      </div>
+        <div class="call-cta">
+          <button id="start-call-btn" class="btn-primary btn-lg" type="button">
+            <span class="call-icon" aria-hidden="true">📞</span>
+            Start call
+          </button>
+          <button id="end-call-btn" class="btn-danger" type="button" hidden>End call</button>
+        </div>
 
-      <div class="status-line">
-        <span id="conn-dot" class="dot" aria-hidden="true"></span>
-        <span id="conn-state">Not connected</span>
-      </div>
+        <div class="call-status-group">
+          <div class="status-line">
+            <span id="conn-dot" class="dot" aria-hidden="true"></span>
+            <span id="conn-state">Not connected</span>
+          </div>
 
-      <div class="status-line">
-        <span>Microphone</span>
-        <span id="mic-state">off</span>
-      </div>
-      <div class="mic-meter" aria-hidden="true"><span id="mic-level"></span></div>
+          <div class="status-line">
+            <span>Microphone</span>
+            <span id="mic-state" class="mic-badge">off</span>
+          </div>
+          <div class="mic-meter" aria-hidden="true"><span id="mic-level"></span></div>
 
-      <p id="status" class="status" role="status" aria-live="polite"></p>
+          <p id="status" class="status" role="status" aria-live="polite"></p>
+        </div>
 
-      <!-- Hidden sink for the agent's remote audio. call.js attaches each
-           subscribed audio track to an <audio> element appended here so the
-           patient actually hears the intake assistant; audio plays without
-           being visible. -->
-      <div id="remote-audio" hidden></div>
-    </section>
+        <!-- Hidden sink for the agent's remote audio. call.js attaches each
+             subscribed audio track to an <audio> element appended here so the
+             patient actually hears the intake assistant; audio plays without
+             being visible. -->
+        <div id="remote-audio" hidden></div>
+      </section>
 
-    <section class="panel">
-      <h3>Getting started</h3>
-      <p>
-        Enter a room name and your name, then select <strong>Start call</strong>
-        to connect. The intake assistant joins the room to greet you, and your
-        care team can review the recorded conversation afterward on the
-        <a href="records.html">Records</a> page.
-      </p>
-    </section>
+      <!-- Secondary "how it works" aside, product onboarding copy. -->
+      <aside class="panel call-aside">
+        <h3>How your call works</h3>
+        <ol class="steps">
+          <li>Enter a room name and your name.</li>
+          <li>Select <strong>Start call</strong> and allow microphone access.</li>
+          <li>The intake assistant joins to greet you and ask a few questions.</li>
+          <li>
+            Your care team reviews the recorded conversation afterward on the
+            <a href="records.html">Records</a> page.
+          </li>
+        </ol>
+        <p class="note">
+          Your microphone level is shown while you talk so you know you're being
+          heard.
+        </p>
+      </aside>
+    </div>
   </main>
 
   <script src="app.js"></script>
