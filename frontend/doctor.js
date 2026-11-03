@@ -1,66 +1,70 @@
 /*
- * Doctor dashboard behavior: render a list of UPCOMING intake calls and wire
- * the UI-only "schedule a call" affordance. Plain vanilla JS, no build, no
- * module.
+ * Doctor dashboard behavior: fetch the REAL call records (GET /api/records --
+ * the SAME existing list endpoint the analyst dashboard uses) and render each
+ * one as a dashboard entry. Plain vanilla JS, no build, no module.
  *
- * 🩹 Demo shortcut: the upcoming-calls list below is MOCK client-side data --
- * there is NO scheduling backend and NO persistence. The ENTER CALL links just
- * open the live call screen (call.html) with a ?room= hint, and the schedule
- * form only shows a non-persisting confirmation; nothing is saved anywhere.
- * -> Production: fetch the authenticated clinician's real upcoming calls from a
- * scheduling service and persist new ones.
+ * Each record is a COMPLETED, signed intake call. Clicking an entry opens the
+ * shared record detail page as the doctor's FULL, non-redacted clinical view
+ * (record.html?run=<run_prefix>&view=doctor -- doctor is record.js's default
+ * view anyway), and every entry carries an ENTER CALL link into the live call
+ * screen (call.html?room=<room>) keyed on the record's room.
+ *
+ * 🩹 Demo shortcut: there is no doctor-specific backend here -- this reuses the
+ * public records list, and the ENTER CALL links just open call.html with a
+ * ?room= hint (call.html's inline prefill script copies it into #room-input
+ * before the frozen call.js runs). The schedule form below is a UI-only
+ * affordance: nothing is persisted and there is NO scheduling backend. →
+ * Production: fetch the authenticated clinician's own patient roster/records
+ * from a role-gated service and persist newly scheduled calls.
  */
 
 'use strict';
 
 function $(id) { return document.getElementById(id); }
 
-// Mock upcoming intake calls. Hardcoded on the client for the demo.
-var UPCOMING_CALLS = [
-  {
-    patient: 'Jordan Patient',
-    time: 'Today, 2:30 PM',
-    reason: 'New patient intake',
-    room: 'intake'
-  },
-  {
-    patient: 'Alex Morgan',
-    time: 'Today, 3:15 PM',
-    reason: 'Medication review follow-up',
-    room: 'intake-amorgan'
-  },
-  {
-    patient: 'Sam Rivera',
-    time: 'Tomorrow, 9:00 AM',
-    reason: 'Post-op check-in',
-    room: 'intake-srivera'
-  }
-];
-
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+function setStatus(msg, kind) {
+  var el = $('status');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.className = 'status' + (kind ? ' ' + kind : '');
 }
 
-function renderUpcoming(calls) {
+function renderRecords(records) {
   var list = $('upcoming-call-list');
   if (!list) return;
   list.innerHTML = '';
 
-  calls.forEach(function (call) {
+  if (!records || records.length === 0) {
+    var empty = document.createElement('li');
+    empty.className = 'note';
+    empty.textContent = 'No records yet. They appear here once an intake call has been processed.';
+    list.appendChild(empty);
+    return;
+  }
+
+  records.forEach(function (rec) {
     var li = document.createElement('li');
     li.className = 'upcoming-call';
 
     var info = document.createElement('div');
     info.className = 'upcoming-call-info';
-    info.innerHTML =
-      '<span class="upcoming-call-patient">' + escapeHtml(call.patient) + '</span>' +
-      '<span class="upcoming-call-time">' + escapeHtml(call.time) + '</span>' +
-      '<span class="upcoming-call-reason">' + escapeHtml(call.reason) + '</span>';
+
+    // Clickable title -> the doctor's full, non-redacted clinical detail view.
+    var link = document.createElement('a');
+    link.href =
+      'record.html?run=' + encodeURIComponent(rec.run_prefix) + '&view=doctor';
+    link.className = 'upcoming-call-patient';
+    link.textContent = rec.room || rec.run_prefix;
+    info.appendChild(link);
+
+    var meta = document.createElement('div');
+    meta.className = 'record-meta';
+    meta.textContent =
+      'run: ' + rec.run_prefix +
+      (rec.session_start ? '  ·  session start: ' + rec.session_start : '') +
+      '  ·  opens as: full clinical report';
+    info.appendChild(meta);
+
     li.appendChild(info);
 
     var enter = document.createElement('a');
@@ -68,13 +72,35 @@ function renderUpcoming(calls) {
     // Link into the live call screen with a room hint. call.html has a small
     // inline prefill script (before the frozen call.js) that reads this ?room=
     // query and copies it into #room-input, so the doctor lands in this
-    // patient's room instead of the default 'intake'.
-    enter.href = 'call.html?room=' + encodeURIComponent(call.room);
+    // record's room instead of the default 'intake'.
+    enter.href = 'call.html?room=' + encodeURIComponent(rec.room || rec.run_prefix);
     enter.innerHTML = '<span aria-hidden="true">📞</span> Enter call';
     li.appendChild(enter);
 
     list.appendChild(li);
   });
+}
+
+async function loadRecords() {
+  setStatus('Loading records…');
+  try {
+    var resp = await fetch('/api/records');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    var data = await resp.json();
+    var records = (data && data.records) || [];
+    renderRecords(records);
+    setStatus(
+      records.length === 0
+        ? 'No records yet.'
+        : records.length === 1
+          ? '1 call record available.'
+          : records.length + ' call records available.',
+      'ok'
+    );
+  } catch (err) {
+    setStatus('Could not load records: ' + err.message, 'error');
+    renderRecords([]);
+  }
 }
 
 function wireSchedule() {
@@ -101,5 +127,5 @@ function wireSchedule() {
   });
 }
 
-renderUpcoming(UPCOMING_CALLS);
+loadRecords();
 wireSchedule();

@@ -3,8 +3,8 @@
  *
  * No framework, no build step. Each page's <body> nav links carry a
  * `data-page` attribute; the matching one is marked `.active`. Kept trivially
- * small on purpose -- the real per-page behavior lives in call.js / records.js
- * / record.js.
+ * small on purpose -- the real per-page behavior lives in call.js / analyst.js
+ * / doctor.js / record.js.
  */
 
 'use strict';

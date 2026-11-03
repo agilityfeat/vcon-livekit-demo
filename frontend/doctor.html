@@ -3,17 +3,20 @@
   Doctor dashboard for the vCon + LiveKit demo app ("vCon Care").
 
   The authenticated-looking landing a clinician reaches after signing in. It
-  frames the clinician workflow: a list of UPCOMING intake calls with an ENTER
-  CALL action into the live call screen (call.html), a SCHEDULE A CALL
-  affordance, and a path to review completed records.
+  lists the clinician's CALL RECORDS -- the real, completed, signed intake calls
+  fetched from GET /api/records (see doctor.js). Each record opens the full,
+  non-redacted clinical detail view (record.html) and offers an ENTER CALL
+  action into the live call screen (call.html). A SCHEDULE A CALL affordance is
+  also shown.
 
   🩹 Demo shortcut: this page is presentational. There is NO auth gate -- it is
-  reachable by filename without signing in. The UPCOMING CALLS list is MOCK
-  client-side data (see doctor.js), and the SCHEDULE action is UI-only: nothing
-  is persisted and there is NO scheduling backend. The ENTER CALL links just
-  open call.html (optionally with a ?room= hint). → Production: a role-gated
-  dashboard backed by a real scheduling service and the authenticated
-  clinician's own patient roster.
+  reachable by filename without signing in. The call records come from the SAME
+  public GET /api/records list the analyst dashboard uses (there is no
+  per-clinician roster), and the SCHEDULE action is UI-only: nothing is
+  persisted and there is NO scheduling backend. The ENTER CALL links just open
+  call.html (with a ?room= hint). → Production: a role-gated dashboard backed by
+  a real scheduling service and the authenticated clinician's own patient
+  roster and records.
 -->
 <html lang="en">
 <head>
@@ -32,7 +35,6 @@
     <nav class="app-nav" aria-label="Primary">
       <a href="index.html" data-page="index">Home</a>
       <a href="call.html" data-page="call">Start call</a>
-      <a href="records.html" data-page="records">Records</a>
       <a href="doctor-signin.html" data-page="doctor-signin">Doctor</a>
       <a href="analyst-signin.html" data-page="analyst-signin">Analyst</a>
     </nav>
@@ -42,19 +44,21 @@
     <section class="hero">
       <h2>Good to see you, Dr. Rivera</h2>
       <p>
-        Here are your upcoming intake calls. Enter a call to join the live
-        conversation, or review a completed record once the call has been
-        processed.
+        Here are your intake call records. Open a record to review the full
+        clinical report with audio and extracted detail, or enter a live call
+        to continue the conversation.
       </p>
     </section>
 
     <section class="panel">
       <div class="list-head">
-        <h3>Upcoming calls</h3>
+        <h3>Your call records</h3>
         <button id="schedule-btn" class="btn-primary" type="button" aria-expanded="false" aria-controls="schedule-form">
           <span aria-hidden="true">＋</span> Schedule a call
         </button>
       </div>
+
+      <p id="status" class="status" role="status" aria-live="polite"></p>
 
       <!-- Schedule affordance: a UI-only form. doctor.js toggles it open and,
            on submit, shows a non-persisting confirmation note. Nothing is
@@ -82,15 +86,6 @@
       </form>
 
       <ul id="upcoming-call-list" class="upcoming-call-list"></ul>
-    </section>
-
-    <section class="panel">
-      <h3>Completed records</h3>
-      <p class="note">
-        Review the signed, verified vCon for any completed intake call with full
-        clinical detail.
-      </p>
-      <a href="records.html" class="btn-primary">Review completed records</a>
     </section>
   </main>
 
