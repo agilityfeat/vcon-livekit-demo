@@ -1,119 +1,136 @@
 <!DOCTYPE html>
 <!--
-  Patient "Start call" page for the vCon + LiveKit demo app.
+  Product landing page for the vCon + LiveKit demo app ("vCon Care").
 
-  This page is NOT inert: the "Start call" button mints a patient LiveKit token
-  from the backend (POST /api/token) and connects to the room with the LiveKit
-  browser client (loaded via CDN/ESM, no build step), publishing the microphone.
-  The human patient then talks to the SAME intake bot the agent worker
-  auto-joins -- a real patient<->bot call that produces real vCon artifacts.
+  This is the marketing/entry surface of the demo and the FIRST thing a visitor
+  sees at /: with StaticFiles(html=True) mounted at /, GET / serves this
+  index.html by filename. It introduces the product and routes a visitor to the
+  patient intake call screen (call.html) via a prominent "click to call"
+  call-to-action, and surfaces the two review roles (doctor / analyst) via their
+  sign-in entries. It is a static page -- it fetches nothing and mints no
+  tokens; the actual call starts on call.html.
 
-  🩹 Demo shortcuts (see the in-page notes):
-    * No authentication: the "role" (patient / doctor / analyst) is just which
-      page you open, not an authorization decision.
-    * The live human DOCTOR on the call is STUBBED. The intake is patient<->bot;
-      the doctor is an ASYNCHRONOUS VIEWER of the produced record (Records page),
-      not a second live participant.
-    * The LiveKit client is CDN-loaded for a no-build demo.
-  → Production: authenticated patients, server-minted tokens bound to a verified
-  record, role-gated access, and a bundled/pinned client.
+  🩹 Demo shortcut: there is NO authentication here. The product "roles"
+  (patient / doctor / analyst) are just which page you open, not an
+  authorization decision, so this landing page does not sign anyone in and the
+  doctor/analyst "sign in" entries are presentational. → Production: a real
+  authenticated front door with sign-in and role-gated access before any intake
+  call or record review.
 -->
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Intake Call &middot; vCon Care</title>
+  <title>vCon Care &middot; Trusted intake calls, verifiable records</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <header class="app-header">
-    <a class="app-brand" href="landing.html">
+    <a class="app-brand" href="index.html">
       <span class="logo">🩺</span>
       <h1>vCon Care</h1>
       <span class="product-tag">intake &middot; records &middot; review</span>
     </a>
     <nav class="app-nav" aria-label="Primary">
-      <a href="landing.html" data-page="landing">Home</a>
-      <a href="index.html" data-page="index">Start call</a>
+      <a href="index.html" data-page="index">Home</a>
+      <a href="call.html" data-page="call">Start call</a>
       <a href="records.html" data-page="records">Records</a>
+      <a href="doctor-signin.html" data-page="doctor-signin">Doctor</a>
+      <a href="analyst-signin.html" data-page="analyst-signin">Analyst</a>
     </nav>
   </header>
 
   <main>
-    <section class="hero">
-      <h2>Start your intake call</h2>
+    <section class="landing-hero">
+      <p class="eyebrow">Virtual conversation records for care teams</p>
+      <h2>Patient intake calls your clinicians can actually trust.</h2>
       <p>
-        You'll speak with our automated intake assistant. The conversation is
-        securely recorded and transcribed so your care team can review it
-        afterward.
+        vCon Care turns every intake conversation into a signed, encrypted
+        record. Patients talk to an automated assistant, and your care team
+        reviews the verified transcript and extracted clinical details
+        afterward &mdash; with the right view for every role.
       </p>
+      <div class="hero-actions">
+        <a href="call.html" class="btn-primary btn-lg">Start an intake call</a>
+        <a href="records.html" class="link-secondary">Browse call records &rarr;</a>
+      </div>
     </section>
 
-    <div class="call-layout">
-      <!-- Primary intake call card: the focused "click to call" surface. -->
-      <section class="panel call-card">
-        <div class="field-row">
-          <label>
-            Room
-            <input id="room-input" type="text" value="intake" />
-          </label>
-          <label>
-            Your name
-            <input id="name-input" type="text" placeholder="Your name" />
-          </label>
-        </div>
-
-        <div class="call-cta">
-          <button id="start-call-btn" class="btn-primary btn-lg" type="button">
-            <span class="call-icon" aria-hidden="true">📞</span>
-            Start call
-          </button>
-          <button id="end-call-btn" class="btn-danger" type="button" hidden>End call</button>
-        </div>
-
-        <div class="call-status-group">
-          <div class="status-line">
-            <span id="conn-dot" class="dot" aria-hidden="true"></span>
-            <span id="conn-state">Not connected</span>
-          </div>
-
-          <div class="status-line">
-            <span>Microphone</span>
-            <span id="mic-state" class="mic-badge">off</span>
-          </div>
-          <div class="mic-meter" aria-hidden="true"><span id="mic-level"></span></div>
-
-          <p id="status" class="status" role="status" aria-live="polite"></p>
-        </div>
-
-        <!-- Hidden sink for the agent's remote audio. call.js attaches each
-             subscribed audio track to an <audio> element appended here so the
-             patient actually hears the intake assistant; audio plays without
-             being visible. -->
-        <div id="remote-audio" hidden></div>
-      </section>
-
-      <!-- Secondary "how it works" aside, product onboarding copy. -->
-      <aside class="panel call-aside">
-        <h3>How your call works</h3>
-        <ol class="steps">
-          <li>Enter a room name and your name.</li>
-          <li>Select <strong>Start call</strong> and allow microphone access.</li>
-          <li>The intake assistant joins to greet you and ask a few questions.</li>
-          <li>
-            Your care team reviews the recorded conversation afterward on the
-            <a href="records.html">Records</a> page.
-          </li>
-        </ol>
-        <p class="note">
-          Your microphone level is shown while you talk so you know you're being
-          heard.
-        </p>
-      </aside>
+    <div class="section-head">
+      <h2>How vCon Care works</h2>
+      <p>One conversation, captured once and reviewable with role-appropriate detail.</p>
     </div>
+
+    <section class="feature-grid">
+      <article class="feature-card">
+        <span class="feature-icon" aria-hidden="true">📞</span>
+        <h3>Automated intake calls</h3>
+        <p>
+          Patients join a live call with an automated intake assistant. The
+          conversation is recorded and transcribed in real time, so nothing from
+          the visit is lost.
+        </p>
+      </article>
+      <article class="feature-card">
+        <span class="feature-icon" aria-hidden="true">🔐</span>
+        <h3>Signed &amp; encrypted records</h3>
+        <p>
+          Each call becomes a vCon record that is cryptographically signed and
+          encrypted. The authoritative clinical transcript is verifiable, so you
+          always know the record has not been tampered with.
+        </p>
+      </article>
+      <article class="feature-card">
+        <span class="feature-icon" aria-hidden="true">👥</span>
+        <h3>Role-based review</h3>
+        <p>
+          Doctors see the full record with audio and clinical detail; analysts
+          see a de-identified, PHI-masked version of the same verified vCon.
+          Every role gets exactly the view it needs.
+        </p>
+      </article>
+    </section>
+
+    <!-- Role entry points: the three ways people reach the product. Patients
+         start a call directly; doctors and analysts "sign in" (presentational)
+         to reach their respective review surfaces. -->
+    <div class="section-head">
+      <h2>Choose how you're here today</h2>
+      <p>Patients place a call; clinicians and analysts sign in to review records.</p>
+    </div>
+
+    <section class="role-grid">
+      <article class="role-card">
+        <span class="role-icon" aria-hidden="true">🧑</span>
+        <h3>Patient</h3>
+        <p>Place a secure intake call with the automated assistant.</p>
+        <a href="call.html" class="btn-primary">Start an intake call</a>
+      </article>
+      <article class="role-card">
+        <span class="role-icon" aria-hidden="true">🩺</span>
+        <h3>Doctor</h3>
+        <p>Review upcoming calls and full clinical records for your patients.</p>
+        <a href="doctor-signin.html" class="link-secondary dark">Doctor sign in &rarr;</a>
+      </article>
+      <article class="role-card">
+        <span class="role-icon" aria-hidden="true">📊</span>
+        <h3>Analyst</h3>
+        <p>Review de-identified, PHI-masked records for aggregate analysis.</p>
+        <a href="analyst-signin.html" class="link-secondary dark">Analyst sign in &rarr;</a>
+      </article>
+    </section>
+
+    <section class="cta-band">
+      <h2>Ready to see it in action?</h2>
+      <p>Place an intake call and watch a verifiable record appear in seconds.</p>
+      <a href="call.html" class="btn-primary btn-lg">Start an intake call</a>
+    </section>
   </main>
 
+  <footer class="site-footer">
+    vCon Care &middot; a demonstration of vCon + LiveKit for verifiable intake records.
+  </footer>
+
   <script src="app.js"></script>
-  <script type="module" src="call.js"></script>
 </body>
 </html>
