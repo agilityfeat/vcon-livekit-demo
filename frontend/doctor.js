@@ -65,9 +65,10 @@ function renderUpcoming(calls) {
 
     var enter = document.createElement('a');
     enter.className = 'btn-primary enter-call-btn';
-    // Link into the live call screen with a room hint. call.html reads the
-    // ?room= query below and pre-fills #room-input (see the inline handoff in
-    // doctor.js is not needed -- the hint is purely a convenience).
+    // Link into the live call screen with a room hint. call.html has a small
+    // inline prefill script (before the frozen call.js) that reads this ?room=
+    // query and copies it into #room-input, so the doctor lands in this
+    // patient's room instead of the default 'intake'.
     enter.href = 'call.html?room=' + encodeURIComponent(call.room);
     enter.innerHTML = '<span aria-hidden="true">📞</span> Enter call';
     li.appendChild(enter);

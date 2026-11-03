@@ -45,16 +45,18 @@
         analysis.
       </p>
 
-      <!-- Presentational sign-in form. The action simply navigates to the
-           analyst dashboard; no credentials are validated. -->
-      <form class="signin-form" action="analyst.html" method="get">
+      <!-- Presentational sign-in form. Submitting just navigates to the analyst
+           dashboard; no credentials are validated. A tiny inline handler cancels
+           the submit and navigates to analyst.html, so the typed password is
+           never serialized into the URL/history even though nothing is checked. -->
+      <form class="signin-form" id="signin-form" action="analyst.html" method="post">
         <label>
           Work email
-          <input type="text" name="email" placeholder="analyst@example-clinic.org" autocomplete="off" />
+          <input type="email" name="email" placeholder="analyst@example-clinic.org" autocomplete="off" />
         </label>
         <label>
           Password
-          <input type="text" name="password" placeholder="••••••••" autocomplete="off" />
+          <input type="password" name="password" placeholder="••••••••" autocomplete="off" />
         </label>
         <button type="submit" class="btn-primary btn-lg">Sign in as analyst</button>
       </form>
@@ -72,5 +74,22 @@
   </footer>
 
   <script src="app.js"></script>
+  <!--
+    🩹 Demo shortcut: no credentials are checked. This handler cancels the form
+    submit (so neither email nor password is ever sent anywhere or placed in the
+    URL) and simply navigates to the analyst dashboard. → Production: a real POST
+    to an identity provider that verifies credentials and issues a session.
+  -->
+  <script>
+    (function () {
+      'use strict';
+      var form = document.getElementById('signin-form');
+      if (!form) return;
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        window.location.href = 'analyst.html';
+      });
+    })();
+  </script>
 </body>
 </html>
