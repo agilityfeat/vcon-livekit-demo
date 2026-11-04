@@ -27,3 +27,6 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# Agent local-file fallback/salvage output
+vcon-output/

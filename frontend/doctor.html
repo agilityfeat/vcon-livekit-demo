@@ -5,16 +5,15 @@
   The authenticated-looking landing a clinician reaches after signing in. It
   lists the clinician's CALL RECORDS -- the real, completed, signed intake calls
   fetched from GET /api/records (see doctor.js). Each record opens the full,
-  non-redacted clinical detail view (record.html) and offers an ENTER CALL
-  action into the live call screen (call.html). A SCHEDULE A CALL affordance is
-  also shown.
+  non-redacted clinical detail view (record.html). A SCHEDULE A CALL affordance is also
+  shown. (Entering a live call from this dashboard was removed; the doctor is an
+  asynchronous viewer of records.)
 
   🩹 Demo shortcut: this page is presentational. There is NO auth gate -- it is
   reachable by filename without signing in. The call records come from the SAME
   public GET /api/records list the analyst dashboard uses (there is no
   per-clinician roster), and the SCHEDULE action is UI-only: nothing is
-  persisted and there is NO scheduling backend. The ENTER CALL links just open
-  call.html (with a ?room= hint). → Production: a role-gated dashboard backed by
+  persisted and there is NO scheduling backend. → Production: a role-gated dashboard backed by
   a real scheduling service and the authenticated clinician's own patient
   roster and records.
 -->
@@ -45,8 +44,7 @@
       <h2>Good to see you, Dr. Rivera</h2>
       <p>
         Here are your intake call records. Open a record to review the full
-        clinical report with audio and extracted detail, or enter a live call
-        to continue the conversation.
+        clinical report with audio and extracted detail.
       </p>
     </section>
 

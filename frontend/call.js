@@ -240,7 +240,7 @@ async function endCall() {
   await teardownCall();
   setConnState('Not connected', '');
   teardownUi();
-  setStatus('Call ended. The record will appear on the Records page once the ' +
+  setStatus('Call ended. The record will appear on the doctor and analyst dashboards once the ' +
     'enrichment pipeline finishes.', 'ok');
 }
 

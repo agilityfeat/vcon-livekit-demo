@@ -198,7 +198,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # END-TO-END: start an execution with the canned skeleton vCon input (the exact
-# input documented in infrastructure/README.md), poll until it finishes, then
+# input documented in docs/infrastructure.md, "Running the pipeline"), poll until it finishes, then
 # assert SUCCEEDED and that the output preserves the vCon version and carries
 # the three analysis entries in order.
 #

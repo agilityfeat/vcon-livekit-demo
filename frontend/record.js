@@ -525,7 +525,7 @@ function renderDialog(doc) {
 
 function init() {
   if (!state.run) {
-    setStatus('No record selected. Go back to the Records page and pick one.', 'error');
+    setStatus('No record selected. Go back to your dashboard and pick one.', 'error');
     return;
   }
   $('run-label').textContent = 'run: ' + state.run;
