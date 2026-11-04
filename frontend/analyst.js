@@ -1,10 +1,14 @@
 /*
- * Records list page: fetch GET /api/records and render each record, linking to
- * the detail page (record.html?run=<run_prefix>). Plain vanilla JS, no build.
+ * Analyst dashboard behavior: fetch GET /api/records (the SAME existing list
+ * endpoint the records page uses) and render each record linking into the
+ * record detail page as the de-identified analyst report
+ * (record.html?run=<run_prefix>&view=analyst). Plain vanilla JS, no build.
  *
- * The backend returns records whether it is scanning S3 (BUCKET_NAME set) or
- * serving the single offline fixture (BUCKET_NAME unset); the shape is the
- * same, so this page does not care which mode is active.
+ * 🩹 Demo shortcut: there is no analyst-specific backend here -- this reuses the
+ * public records list, and the de-identification happens in the record detail's
+ * analyst (redacted) view. "analyst" is framing, not an enforced authorization
+ * boundary. -> Production: a server that only ever returns PHI-masked records
+ * to an authenticated analyst, with audit logging.
  */
 
 'use strict';
@@ -13,6 +17,7 @@ function $(id) { return document.getElementById(id); }
 
 function setStatus(msg, kind) {
   var el = $('status');
+  if (!el) return;
   el.textContent = msg || '';
   el.className = 'status' + (kind ? ' ' + kind : '');
 }
@@ -20,19 +25,22 @@ function setStatus(msg, kind) {
 function renderRecords(records) {
   var list = $('record-list');
   var empty = $('empty-state');
+  if (!list) return;
   list.innerHTML = '';
 
   if (!records || records.length === 0) {
-    empty.hidden = false;
+    if (empty) empty.hidden = false;
     return;
   }
-  empty.hidden = true;
+  if (empty) empty.hidden = true;
 
   records.forEach(function (rec) {
     var li = document.createElement('li');
 
     var link = document.createElement('a');
-    link.href = 'record.html?run=' + encodeURIComponent(rec.run_prefix);
+    // Open the record detail framed as the de-identified analyst report.
+    link.href =
+      'record.html?run=' + encodeURIComponent(rec.run_prefix) + '&view=analyst';
     link.textContent = rec.room || rec.run_prefix;
     li.appendChild(link);
 
@@ -40,7 +48,8 @@ function renderRecords(records) {
     meta.className = 'record-meta';
     meta.textContent =
       'run: ' + rec.run_prefix +
-      (rec.session_start ? '  ·  session start: ' + rec.session_start : '');
+      (rec.session_start ? '  ·  session start: ' + rec.session_start : '') +
+      '  ·  opens as: de-identified analyst report';
     li.appendChild(meta);
 
     list.appendChild(li);
@@ -57,8 +66,8 @@ async function loadRecords() {
     renderRecords(records);
     setStatus(
       records.length === 1
-        ? '1 record.'
-        : records.length + ' records.',
+        ? '1 record available for review.'
+        : records.length + ' records available for review.',
       'ok'
     );
   } catch (err) {

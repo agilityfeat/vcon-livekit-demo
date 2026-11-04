@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<!--
+  Doctor dashboard for the vCon + LiveKit demo app ("vCon Care").
+
+  The authenticated-looking landing a clinician reaches after signing in. It
+  lists the clinician's CALL RECORDS -- the real, completed, signed intake calls
+  fetched from GET /api/records (see doctor.js). Each record opens the full,
+  non-redacted clinical detail view (record.html) and offers an ENTER CALL
+  action into the live call screen (call.html). A SCHEDULE A CALL affordance is
+  also shown.
+
+  🩹 Demo shortcut: this page is presentational. There is NO auth gate -- it is
+  reachable by filename without signing in. The call records come from the SAME
+  public GET /api/records list the analyst dashboard uses (there is no
+  per-clinician roster), and the SCHEDULE action is UI-only: nothing is
+  persisted and there is NO scheduling backend. The ENTER CALL links just open
+  call.html (with a ?room= hint). → Production: a role-gated dashboard backed by
+  a real scheduling service and the authenticated clinician's own patient
+  roster and records.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Doctor dashboard &middot; vCon Care</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <a class="app-brand" href="index.html">
+      <span class="logo">🩺</span>
+      <h1>vCon Care</h1>
+      <span class="product-tag">intake &middot; records &middot; review</span>
+    </a>
+    <nav class="app-nav" aria-label="Primary">
+      <a href="index.html" data-page="index">Home</a>
+      <a href="call.html" data-page="call">Start call</a>
+      <a href="doctor-signin.html" data-page="doctor-signin">Doctor</a>
+      <a href="analyst-signin.html" data-page="analyst-signin">Analyst</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h2>Good to see you, Dr. Rivera</h2>
+      <p>
+        Here are your intake call records. Open a record to review the full
+        clinical report with audio and extracted detail, or enter a live call
+        to continue the conversation.
+      </p>
+    </section>
+
+    <section class="panel">
+      <div class="list-head">
+        <h3>Your call records</h3>
+        <button id="schedule-btn" class="btn-primary" type="button" aria-expanded="false" aria-controls="schedule-form">
+          <span aria-hidden="true">＋</span> Schedule a call
+        </button>
+      </div>
+
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+
+      <!-- Schedule affordance: a UI-only form. doctor.js toggles it open and,
+           on submit, shows a non-persisting confirmation note. Nothing is
+           saved -- there is no scheduling backend. -->
+      <form id="schedule-form" class="schedule-form" hidden>
+        <div class="field-row">
+          <label>
+            Patient name
+            <input type="text" id="schedule-patient" placeholder="Patient name" autocomplete="off" />
+          </label>
+          <label>
+            When
+            <input type="text" id="schedule-when" placeholder="e.g. Tomorrow 9:00 AM" autocomplete="off" />
+          </label>
+          <label>
+            Reason
+            <input type="text" id="schedule-reason" placeholder="e.g. New patient intake" autocomplete="off" />
+          </label>
+        </div>
+        <div class="call-cta">
+          <button type="submit" class="btn-primary">Add to schedule</button>
+          <span class="note">🩹 Demo only, nothing is saved.</span>
+        </div>
+        <p id="schedule-note" class="status" role="status" aria-live="polite"></p>
+      </form>
+
+      <ul id="upcoming-call-list" class="upcoming-call-list"></ul>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    vCon Care &middot; a demonstration of vCon + LiveKit for verifiable intake records.
+  </footer>
+
+  <script src="app.js"></script>
+  <script src="doctor.js"></script>
+</body>
+</html>

@@ -1,5 +1,10 @@
 /*
- * Record detail rendering + doctor/analyst toggle.
+ * Record detail rendering.
+ *
+ * Which role's report renders is decided by the ?view= link param set by the
+ * dashboard that linked here (?view=analyst -> redacted; absent/other ->
+ * doctor/full default). There is no on-page toggle: the page renders the one
+ * report its URL selects.
  *
  * Fetches the readable vCon JSON the backend already decrypted/verified:
  *   doctor  -> GET /api/records/{run}/full
@@ -61,21 +66,10 @@ async function ensureRedacted() {
   return state.redacted;
 }
 
-/* ---------- mode toggle ---------- */
-
-function reflectModeButtons() {
-  var doc = $('view-doctor-btn');
-  var anal = $('view-analyst-btn');
-  var isDoctor = state.mode === 'doctor';
-  doc.classList.toggle('active', isDoctor);
-  anal.classList.toggle('active', !isDoctor);
-  doc.setAttribute('aria-pressed', String(isDoctor));
-  anal.setAttribute('aria-pressed', String(!isDoctor));
-}
+/* ---------- view selection ---------- */
 
 async function switchToDoctor() {
   state.mode = 'doctor';
-  reflectModeButtons();
   try {
     await ensureFull();
     setStatus('Showing the full record (doctor view).', 'ok');
@@ -87,7 +81,6 @@ async function switchToDoctor() {
 
 async function switchToAnalyst() {
   state.mode = 'analyst';
-  reflectModeButtons();
   try {
     // Fetch the redacted view; also ensure the full view so the linkage banner
     // can compare redacted.redacted.uuid against full.uuid.
@@ -531,17 +524,21 @@ function renderDialog(doc) {
 /* ---------- init ---------- */
 
 function init() {
-  $('view-doctor-btn').addEventListener('click', switchToDoctor);
-  $('view-analyst-btn').addEventListener('click', switchToAnalyst);
-
   if (!state.run) {
     setStatus('No record selected. Go back to the Records page and pick one.', 'error');
     return;
   }
   $('run-label').textContent = 'run: ' + state.run;
-  reflectModeButtons();
-  // Default to the doctor (full) view.
-  switchToDoctor();
+  // The ?view= link param decides which report renders: a link from the analyst
+  // dashboard (?view=analyst) arrives straight in the redacted view; any other
+  // value (including absent, e.g. the doctor dashboard's &view=doctor) keeps the
+  // doctor/full default. There is no on-page toggle to switch after load.
+  var view = new URLSearchParams(window.location.search).get('view');
+  if (view === 'analyst') {
+    switchToAnalyst();
+  } else {
+    switchToDoctor();
+  }
 }
 
 init();

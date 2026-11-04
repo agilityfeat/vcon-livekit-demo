@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<!--
+  Doctor (clinician) sign-in shell for the vCon + LiveKit demo app ("vCon Care").
+
+  This is the presentational "front door" a clinician would use to reach their
+  dashboard. It renders a realistic email/password sign-in card, but signing in
+  does NOT authenticate anyone: the form simply navigates to doctor.html.
+
+  🩹 Demo shortcut: there is NO real authentication here. No credentials are
+  checked, no session is created, and the "role" (doctor) is just which page you
+  open, not an authorization decision -- the form's only effect is to navigate
+  to doctor.html. → Production: a real identity provider / SSO, verified
+  credentials, a server-issued session, and role-gated access before any patient
+  record or upcoming-call data is shown.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Doctor sign in &middot; vCon Care</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <a class="app-brand" href="index.html">
+      <span class="logo">🩺</span>
+      <h1>vCon Care</h1>
+      <span class="product-tag">intake &middot; records &middot; review</span>
+    </a>
+    <nav class="app-nav" aria-label="Primary">
+      <a href="index.html" data-page="index">Home</a>
+      <a href="call.html" data-page="call">Start call</a>
+      <a href="doctor-signin.html" data-page="doctor-signin">Doctor</a>
+      <a href="analyst-signin.html" data-page="analyst-signin">Analyst</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="signin-card">
+      <span class="signin-icon" aria-hidden="true">🩺</span>
+      <h2>Clinician sign in</h2>
+      <p class="signin-sub">
+        Sign in to review your upcoming intake calls and the full clinical
+        records for your patients.
+      </p>
+
+      <!-- Presentational sign-in form. Submitting just navigates to the doctor
+           dashboard; no credentials are validated. A tiny inline handler cancels
+           the submit and navigates to doctor.html, so the typed password is
+           never serialized into the URL/history even though nothing is checked. -->
+      <form class="signin-form" id="signin-form" action="doctor.html" method="post">
+        <label>
+          Work email
+          <input type="email" name="email" placeholder="clinician@example-clinic.org" autocomplete="off" />
+        </label>
+        <label>
+          Password
+          <input type="password" name="password" placeholder="••••••••" autocomplete="off" />
+        </label>
+        <button type="submit" class="btn-primary btn-lg">Sign in as doctor</button>
+      </form>
+
+      <p class="signin-demo-note">
+        <span aria-hidden="true">🩹</span>
+        Demo only &mdash; no credentials are checked. Signing in just opens the
+        doctor dashboard.
+      </p>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    vCon Care &middot; a demonstration of vCon + LiveKit for verifiable intake records.
+  </footer>
+
+  <script src="app.js"></script>
+  <!--
+    🩹 Demo shortcut: no credentials are checked. This handler cancels the form
+    submit (so neither email nor password is ever sent anywhere or placed in the
+    URL) and simply navigates to the doctor dashboard. → Production: a real POST
+    to an identity provider that verifies credentials and issues a session.
+  -->
+  <script>
+    (function () {
+      'use strict';
+      var form = document.getElementById('signin-form');
+      if (!form) return;
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        window.location.href = 'doctor.html';
+      });
+    })();
+  </script>
+</body>
+</html>

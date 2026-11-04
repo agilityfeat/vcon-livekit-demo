@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<!--
+  Patient "Start call" screen for the vCon + LiveKit demo app ("vCon Care").
+
+  This page is NOT inert: the "Start call" button mints a patient LiveKit token
+  from the backend (POST /api/token) and connects to the room with the LiveKit
+  browser client (loaded via CDN/ESM, no build step), publishing the microphone.
+  The human patient then talks to the SAME intake bot the agent worker
+  auto-joins -- a real patient<->bot call that produces real vCon artifacts.
+
+  🩹 Demo shortcuts (see the in-page notes):
+    * No authentication: the "role" (patient / doctor / analyst) is just which
+      page you open, not an authorization decision.
+    * The live human DOCTOR on the call is STUBBED. The intake is patient<->bot;
+      the doctor is an ASYNCHRONOUS VIEWER of the produced record (Records page),
+      not a second live participant.
+    * The LiveKit client is CDN-loaded for a no-build demo.
+  → Production: authenticated patients, server-minted tokens bound to a verified
+  record, role-gated access, and a bundled/pinned client.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Intake Call &middot; vCon Care</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <a class="app-brand" href="index.html">
+      <span class="logo">🩺</span>
+      <h1>vCon Care</h1>
+      <span class="product-tag">intake &middot; records &middot; review</span>
+    </a>
+    <nav class="app-nav" aria-label="Primary">
+      <a href="index.html" data-page="index">Home</a>
+      <a href="call.html" data-page="call">Start call</a>
+      <a href="doctor-signin.html" data-page="doctor-signin">Doctor</a>
+      <a href="analyst-signin.html" data-page="analyst-signin">Analyst</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h2>Start your intake call</h2>
+      <p>
+        You'll speak with our automated intake assistant. The conversation is
+        securely recorded and transcribed so your care team can review it
+        afterward.
+      </p>
+    </section>
+
+    <div class="call-layout">
+      <!-- Primary intake call card: the focused patient<->bot call surface. -->
+      <section class="panel call-card">
+        <!-- Two-party call stage: the patient and the automated intake
+             assistant, framed like a real voice call. Presentational only;
+             the live connection is driven entirely by call.js. -->
+        <div class="call-stage" aria-hidden="true">
+          <div class="call-party">
+            <span class="call-avatar">🧑</span>
+            <span class="call-party-name">You</span>
+            <span class="call-party-role">Patient</span>
+          </div>
+          <div class="call-link">
+            <span class="call-link-dot"></span>
+            <span class="call-link-dot"></span>
+            <span class="call-link-dot"></span>
+          </div>
+          <div class="call-party">
+            <span class="call-avatar">🤖</span>
+            <span class="call-party-name">Intake assistant</span>
+            <span class="call-party-role">Automated bot</span>
+          </div>
+        </div>
+
+        <!-- Pre-call setup: room + name (kept from the original screen). -->
+        <div class="field-row">
+          <label>
+            Room
+            <input id="room-input" type="text" value="intake" />
+          </label>
+          <label>
+            Your name
+            <input id="name-input" type="text" placeholder="Your name" />
+          </label>
+        </div>
+
+        <div class="call-cta">
+          <button id="start-call-btn" class="btn-primary btn-lg" type="button">
+            <span class="call-icon" aria-hidden="true">📞</span>
+            Start call
+          </button>
+          <button id="end-call-btn" class="btn-danger" type="button" hidden>End call</button>
+        </div>
+
+        <div class="call-status-group">
+          <div class="status-line">
+            <span id="conn-dot" class="dot" aria-hidden="true"></span>
+            <span id="conn-state">Not connected</span>
+          </div>
+
+          <div class="status-line">
+            <span>Microphone</span>
+            <span id="mic-state" class="mic-badge">off</span>
+          </div>
+          <div class="mic-meter" aria-hidden="true"><span id="mic-level"></span></div>
+
+          <p id="status" class="status" role="status" aria-live="polite"></p>
+        </div>
+
+        <!-- Hidden sink for the agent's remote audio. call.js attaches each
+             subscribed audio track to an <audio> element appended here so the
+             patient actually hears the intake assistant; audio plays without
+             being visible. -->
+        <div id="remote-audio" hidden></div>
+      </section>
+
+      <!-- Secondary "how it works" aside, product onboarding copy. -->
+      <aside class="panel call-aside">
+        <h3>How your call works</h3>
+        <ol class="steps">
+          <li>Enter a room name and your name.</li>
+          <li>Select <strong>Start call</strong> and allow microphone access.</li>
+          <li>The intake assistant joins to greet you and ask a few questions.</li>
+          <li>
+            Your care team reviews the recorded conversation afterward in their
+            dashboard.
+          </li>
+        </ol>
+        <p class="note">
+          Your microphone level is shown while you talk so you know you're being
+          heard.
+        </p>
+      </aside>
+    </div>
+  </main>
+
+  <script src="app.js"></script>
+  <!--
+    🩹 Demo shortcut: prefill the room from a ?room= URL hint BEFORE call.js runs.
+    call.js is a frozen script that reads the room only from #room-input, so any
+    link that carries a patient's room as ?room= relies on this tiny inline
+    classic script to copy it into #room-input first. → Production: the room
+    would be derived from an authenticated, server-issued call record, not a
+    client-supplied query param.
+  -->
+  <script>
+    (function () {
+      'use strict';
+      var params = new URLSearchParams(window.location.search);
+      var room = params.get('room');
+      var input = document.getElementById('room-input');
+      if (room && input) { input.value = room; }
+    })();
+  </script>
+  <script type="module" src="call.js"></script>
+</body>
+</html>
