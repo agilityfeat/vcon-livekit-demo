@@ -113,7 +113,7 @@ def _prefix_from_recording_key(recording_key):
     """Derive the run-key prefix from the recording object key.
 
     The recording object and vcon-skeleton.json share a run prefix:
-    ``<room>/<session_start>/<timestamp>/<file>``. Strip the trailing file name
+    ``<room_name>/<session_start_iso>/<file>``. Strip the trailing file name
     so the sibling seal objects land next to vcon-skeleton.json.
     """
     if isinstance(recording_key, str) and "/" in recording_key:

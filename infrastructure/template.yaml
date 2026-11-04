@@ -18,8 +18,8 @@ AWSTemplateFormatVersion: '2010-09-09'
 #   * State machine    - Step Functions orchestrator that runs the real
 #                        enrichment pipeline (poll S3 -> Transcribe Medical async
 #                        batch awaited by the state machine -> Comprehend Medical
-#                        + Bedrock in parallel -> merge into analysis[]); invoked
-#                        by the local app via StartExecution.
+#                        + Bedrock in parallel -> merge into analysis[]); started
+#                        by the agent (persistence.py) via StartExecution.
 #   * IAM roles        - a Step Functions execution role and a Lambda execution
 #                        role granting the permissions the pipeline needs.
 #
@@ -32,9 +32,9 @@ AWSTemplateFormatVersion: '2010-09-09'
 # Explicitly NOT created (these are managed services you CALL, not resources you
 # create - the template only grants IAM permission to use them):
 #   * Transcribe Medical, Comprehend Medical, Bedrock
-#   * Bedrock model access (a per-model console opt-in; see README prerequisite)
+#   * Bedrock model access (a per-model console opt-in; see docs/infrastructure.md, "Bedrock model access")
 #   * No EventBridge / webhook endpoint (enrichment is triggered via
-#     StartExecution by the local app, with a deterministic idempotent name)
+#     StartExecution by the agent at session end, with a deterministic idempotent name)
 #   * No compute for the agent (no ECS / EC2 / Fargate; the agent runs locally)
 # =============================================================================
 

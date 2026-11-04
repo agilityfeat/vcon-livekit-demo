@@ -1,6 +1,6 @@
 /*
  * Analyst dashboard behavior: fetch GET /api/records (the SAME existing list
- * endpoint the records page uses) and render each record linking into the
+ * endpoint the doctor dashboard uses) and render each record linking into the
  * record detail page as the de-identified analyst report
  * (record.html?run=<run_prefix>&view=analyst). Plain vanilla JS, no build.
  *

@@ -9,7 +9,7 @@
   🩹 Demo shortcut: this page is presentational. There is NO auth gate -- it is
   reachable by filename without signing in, and "analyst" is framing, not an
   enforced authorization boundary. It reuses the SAME public GET /api/records
-  list the doctor/records pages use; the de-identification happens in the record
+  list the doctor dashboard uses; the de-identification happens in the record
   detail's analyst (redacted) view, not here. → Production: an enforced
   authorization boundary so analysts only ever receive PHI-masked records, with
   audit logging.

@@ -99,7 +99,7 @@ def role_to_index(role: str) -> int:
 def run_key(room_name: str, session_start_iso: str) -> str:
     """Build the unique-key-per-run S3 object key for the vCon skeleton.
 
-    Layout (exactly as documented in infrastructure/README.md):
+    Layout (exactly as documented in docs/infrastructure.md, "S3 key convention"):
 
         <room_name>/<session_start_iso>/vcon-skeleton.json
 
@@ -114,8 +114,8 @@ def run_key(room_name: str, session_start_iso: str) -> str:
 def recording_key(room_name: str, session_start_iso: str) -> str:
     """Build the unique-key-per-run S3 object key for the call recording.
 
-    Layout (exactly as documented in infrastructure/README.md, parallel to
-    :func:`run_key`):
+    Layout (exactly as documented in docs/infrastructure.md "S3 key convention",
+    parallel to :func:`run_key`):
 
         <room_name>/<session_start_iso>/recording.ogg
 
