@@ -1,200 +1,162 @@
-# End-to-end demo application
+# Demo application
 
-A single, locally-runnable end-to-end demo built on top of the intake agent and
-the AWS enrichment + seal pipeline. It makes the whole flow visible from one
-app that looks like a real product:
+A single, locally runnable app ("vCon Care") built on the intake agent and the AWS
+enrichment and seal pipeline. One `uvicorn` process serves both the API and the static
+UI.
 
-1. A **human patient** opens the app and places a **real** intake call to the
-   bot from the browser (the mic is published to the same LiveKit room the agent
-   worker auto-joins).
-2. The call is recorded, enriched, signed, encrypted, and redacted by the
-   deployed pipeline + seal step, producing vCon artifacts in S3.
-3. A **doctor** reviews the full record and an **analyst** reviews the redacted
-   record, both as **asynchronous viewers** of the produced record.
+1. A **patient** opens the app and places a real intake call to the bot from the
+   browser. The microphone is published to the LiveKit room the agent worker joins.
+2. The call is recorded, enriched, signed, encrypted, and redacted by the deployed
+   pipeline, producing vCon objects in S3.
+3. A **doctor** reviews the full record, with call audio and extracted clinical detail.
+   An **analyst** reviews the redacted record.
 
-The backend does ALL the crypto server-side (verify + decrypt) and serves
-readable vCon JSON, so the browser never handles the demo signing key.
-
-## Layout
-
-```
-frontend/
-  index.html / call.js     Patient "Start call" page (real patient<->bot call)
-  records.html / records.js Records list (GET /api/records)
-  record.html / record.js   Record detail, doctor/analyst toggle
-  vcon-helpers.js           Pure, DOM-free vCon helpers (shared, Node-checkable)
-  app.js                    App-shell nav highlighting
-  styles.css                Shared stylesheet
-  fixtures/                 Offline sample pair + the generator script + demo key
-```
-
-The backend lives in `src/vcon_agent/app/` (a pure, framework-free
-`records.py` core + a thin `main.py` FastAPI route layer that also serves this
-`frontend/` directory as static files).
+The backend does all the crypto server-side (it decrypts the JWE and verifies the JWS
+with the demo signing key) and returns readable vCon JSON, so the browser never handles
+the key.
 
 ## Run it
 
-Install the app extra and start one process that serves both the API and the UI:
+Install the `app` extra (the Nix shell already does) and start one process:
 
 ```bash
 pip install -e '.[app]'
-PYTHONPATH=src:infrastructure/functions/seal \
-    python -m uvicorn vcon_agent.app.main:app --reload
+python -m uvicorn vcon_agent.app.main:app --reload
 # open http://127.0.0.1:8000/
 ```
 
-Launch with `python -m uvicorn` (not a bare `uvicorn`) so the server always runs
-under the same interpreter as your active virtualenv.
+No `PYTHONPATH` is needed. `records.py` adds `infrastructure/functions/seal/` to
+`sys.path` itself. Use `python -m uvicorn` so the server runs under your active
+virtualenv's interpreter.
 
-### Live mode (real call + real records)
+### Offline mode: no call, no AWS
 
-Set the real credentials in `.env` (same ones the agent uses: `LIVEKIT_URL`,
-`LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, plus `BUCKET_NAME` / `AWS_REGION` and
-the signing key). Start the agent worker in another terminal so the bot is in
-the room:
+If `BUCKET_NAME` is absent or empty, the backend serves one synthetic record from the
+committed fixtures in `frontend/fixtures/`. Doctor and analyst views are fully
+demoable; the patient call page still needs real LiveKit credentials to connect.
+
+The backend loads the repo-root `.env` at startup, so the switch is whether
+`BUCKET_NAME` has a value **in the loaded environment**. If you have a populated `.env`
+from the live demo, **comment out the `BUCKET_NAME` line** (prefix it with `#`) and
+restart the server.
+
+> **Why not `env -u BUCKET_NAME`?** The backend re-reads `.env` after the process
+> starts, so the unset is undone. Commenting the line out in `.env` is the reliable
+> switch.
+
+The offline record has the run prefix `fixtures/sample-call`. In offline mode the
+backend ignores the run prefix and returns that one pair for any request, and
+`/api/records/.../audio` returns 404, so the record view shows "Audio is not available
+in offline/demo mode".
+
+### Live mode: real call, real records
+
+Prerequisites: a deployed stack, the `.env` filled in from its Outputs, and the shared
+signing key set on both sides (see
+[infrastructure.md](infrastructure.md#shared-signing-key)). Then run the agent in one
+terminal and the backend in another:
 
 ```bash
 python -m vcon_agent.agent dev
+python -m uvicorn vcon_agent.app.main:app --reload
 ```
 
-Then open the app, click **Start call**, and talk to the bot. Once the pipeline
-finishes, the record shows up on the **Records** page.
+Open the app, go to **Start call**, and talk to the bot. When you end the call the agent
+uploads the vCon and starts the pipeline; once it has run, the record appears on the
+doctor and analyst dashboards. This is not instant, because Transcribe Medical is a
+batch job and the Seal step runs last; a record only lists once `vcon-signed.jws` exists.
 
-#### Prerequisite: share the signing key BEFORE the first call
+#### Signing key mismatch
 
-The Seal Lambda and the backend viewer must use the SAME signing key, or the
-records you produce are permanently unreadable (see
-[Signing key must match (live mode)](#signing-key-must-match-live-mode) below
-for the symptom). Do this ONCE, before you place the first call whose records
-you intend to view:
+In live mode the backend decrypts `vcon-full.jwe` and verifies the JWS with
+`VCON_SIGNING_PRIVATE_JWK` from `.env`, while the Seal Lambda sealed them with its own
+`VCON_SIGNING_PRIVATE_JWK`, or with an ephemeral in-memory key if it had none. If they
+differ, the doctor view fails to decrypt and the analyst view fails to verify. The
+backend then returns **HTTP 409** with "This record was sealed with a different signing
+key ...", instead of a raw 500. Records sealed with a mismatched or ephemeral key can
+never be read back. Fix it by setting the same key on both sides and placing a **new**
+call.
 
-1. Generate a demo keypair and capture the output:
+## What each page does
 
-   ```bash
-   python -c "from jwcrypto import jwk; print(jwk.JWK.generate(kty='RSA', size=2048).export(private_key=True))"
-   ```
+All pages live in `frontend/` and share `styles.css` and the nav highlighting in
+`app.js`.
 
-2. Deploy / update the Seal Lambda with that key as the CloudFormation
-   parameter `VconSigningPrivateJwk` (see
-   [infrastructure/README.md](../infrastructure/README.md#deploy-aws-sam) for
-   the full deploy flow):
+| Page | Files | Behavior |
+|---|---|---|
+| Landing | `index.html` | Static product page with entry points for the three roles. |
+| Patient call | `call.html`, `call.js` | Room (default `intake`) and name fields. **Start call** posts to `/api/token`, connects with the LiveKit browser client (loaded from a CDN as an ES module), publishes the mic with a level meter, and plays the bot's audio. The LiveKit server URL comes from the token response. A `?room=` query parameter prefills the room. |
+| Doctor sign-in | `doctor-signin.html` | Presentational form; submitting navigates to the dashboard. No credentials are checked. |
+| Doctor dashboard | `doctor.html`, `doctor.js` | Lists call records from `GET /api/records`. Each links to `record.html?run=<run_prefix>&view=doctor`. A **Schedule a call** form is UI-only and saves nothing. |
+| Analyst sign-in | `analyst-signin.html` | Same as the doctor sign-in, for the analyst. |
+| Analyst dashboard | `analyst.html`, `analyst.js` | Lists the same records. Each links to `record.html?run=<run_prefix>&view=analyst`. |
+| Record viewer | `record.html`, `record.js` | Renders the report selected by `?view=`. See below. |
+| Helpers | `vcon-helpers.js` | Pure, DOM-free vCon helpers used by the viewer. |
 
-   ```bash
-   sam deploy \
-     --stack-name vcon-livekit-demo \
-     --capabilities CAPABILITY_NAMED_IAM \
-     --parameter-overrides VconSigningPrivateJwk='<the-generated-key>'
-   ```
+There is no standalone records list and no on-page doctor/analyst toggle. The report you
+see is decided by the `view` query parameter of the link you followed (`analyst` gives
+the redacted view; anything else gives the full view).
 
-3. Put the SAME value in the local `.env` as `VCON_SIGNING_PRIVATE_JWK`.
+### Record viewer
 
-Only the PRIVATE key must match; the backend derives the public half from it.
-If you skip this, the Seal Lambda falls back to a throwaway per-invocation key
-and the records it writes can never be decrypted or verified later.
+- **Doctor view** (`GET /api/records/{run}/full`): the decrypted, verified full vCon. It
+  shows the record metadata, **Call audio** (a presigned URL from
+  `GET /api/records/{run}/audio`), parties, extracted medications and conditions, the
+  summary with its provenance, the **authoritative clinical transcript**, and the **live
+  transcript** for reference. Clicking a medication seeks the audio to the dialog turn it
+  came from.
+- **Analyst view** (`GET /api/records/{run}/redacted`): the verified redacted vCon led by
+  a "De-identified, PHI masked" headline with `[REDACTED]` tokens highlighted. The
+  full-to-redacted linkage proof (uuids, pointer type, `content_hash`) sits in a
+  collapsed verification section, the full copy's `s3://` URL is not shown, and the call
+  audio is withheld.
 
-### Signing key must match (live mode)
+## Backend API
 
-> **Note:** In live mode the backend decrypts `vcon-full.jwe` and verifies the
-> JWS using `VCON_SIGNING_PRIVATE_JWK` from `.env`, while the deployed Seal
-> Lambda seals those S3 artifacts using ITS own `VCON_SIGNING_PRIVATE_JWK` (set
-> at deploy time via the CloudFormation parameter `VconSigningPrivateJwk`), or,
-> if that variable is unset in the Lambda, an **ephemeral in-memory keypair**
-> generated per invocation. The two must be the **same key**, or the doctor /
-> full view fails to decrypt and the analyst / redacted view fails to verify.
-> On a mismatch the backend now returns a friendly **HTTP 409** with the detail
-> "This record was sealed with a different signing key ..." (instead of a raw
-> HTTP 500), so the cause is legible. Records sealed by an ephemeral (or
-> otherwise mismatched) key can never be read back later.
->
-> See [Prerequisite: share the signing key BEFORE the first call](#prerequisite-share-the-signing-key-before-the-first-call)
-> for the ordered steps that avoid this up front.
->
-> Fix: set the **same** `VCON_SIGNING_PRIVATE_JWK` in BOTH the Seal Lambda
-> environment and the local `.env`, then place a NEW call (previously sealed
-> records keep their old key and stay undecryptable). Generate a keypair with:
->
-> ```bash
-> python -c "from jwcrypto import jwk; print(jwk.JWK.generate(kty='RSA', size=2048).export(private_key=True))"
-> ```
+Routes in `src/vcon_agent/app/main.py`. `main.py` is a thin route layer; the logic is in
+the framework-free `records.py` and `livekit_tokens.py`.
 
-### Offline mode (viewer side, no call, no AWS)
+| Route | Purpose |
+|---|---|
+| `POST /api/token` | Mint a LiveKit patient token. Body `{room, identity, name?}`. Returns `{token, room, identity, url}`. |
+| `GET /api/records` | List records. In S3 mode, scans the bucket for `vcon-signed.jws`, newest session first. Offline, returns the one fixture record. |
+| `GET /api/records/{run_prefix}/full` | Decrypted and verified full vCon. |
+| `GET /api/records/{run_prefix}/redacted` | Verified redacted vCon. |
+| `GET /api/records/{run_prefix}/audio` | Short-lived presigned GET URL for `<run_prefix>/recording.ogg`. 404 offline or when there is no recording. |
 
-The backend loads the repo-root `.env` into the environment at startup, so the
-offline switch is driven by whether `BUCKET_NAME` is **present in the loaded
-environment**: set → read real records from S3; absent → serve the committed
-offline fixture pair.
-
-To force offline mode when you have a populated `.env` (the one you filled in
-for the live demo), **comment out the `BUCKET_NAME` line in `.env`** (prefix it
-with `#`) and restart the server. An empty or absent `.env` also runs offline.
-
-> **Why not `env -u`?** Prefixing the launch with
-> `env -u BUCKET_NAME ... uvicorn ...` does **not** force offline mode: the app
-> re-reads `.env` at startup and re-sets `BUCKET_NAME` after the process has
-> started, so the unset is undone. Commenting the line out in `.env` is the only
-> reliable switch.
-
-In offline mode the backend serves one synthetic record from the committed
-sample fixture pair under `frontend/fixtures/`, so the records list and the
-doctor / analyst views are fully demoable with no live call and no AWS. That
-record has the run prefix `fixtures/sample-call`; open **that** record from the
-Records list (not a stale `console-...` URL left over from a live session, which
-would still hit the S3 lookup). (The patient Start-call page still needs real
-LiveKit creds to actually connect.)
+Errors: **404** if an artifact is missing, **409** on a signing-key mismatch. `frontend/`
+is mounted at `/`, so `GET /` serves the landing page.
 
 ## Offline fixtures
 
-The fixture pair is PRODUCED by running the authoritative seal core
-(`infrastructure/functions/seal/sealing.py`) over a representative enriched
-vCon, so it carries the REAL redacted-pointer shape
-(`{uuid, type:'application/vcon+jws', url:'s3://.../vcon-full.jwe',
-content_hash:'sha512-...'}`). Regenerate (and re-verify) with:
+The fixture set in `frontend/fixtures/` is produced by running the real seal core
+(`infrastructure/functions/seal/sealing.py`) over a representative enriched vCon, so it
+carries the real `redacted` pointer shape (`{uuid, type: 'application/vcon+jws', url:
+'s3://.../vcon-full.jwe', content_hash: 'sha512-...'}`):
+
+| File | Contents |
+|---|---|
+| `vcon-full.json` | Decoded full vCon served as the doctor view offline. |
+| `vcon-redacted.json` | Decoded redacted vCon served as the analyst view offline. |
+| `vcon-signed.jws`, `vcon-full.jwe`, `vcon-redacted.jws` | The sealed artifacts the JSON files were decoded from. |
+| `demo-insecure-do-not-use.jwk` | Throwaway demo key, committed on purpose so the JWE and its `content_hash` stay a consistent captured pair. It protects nothing real. |
+| `generate_fixtures.py` | The generator. |
+
+Regenerate and re-verify from the repo root:
 
 ```bash
-PYTHONPATH=.vconlib:src:infrastructure/functions/seal \
-    python3 frontend/fixtures/generate_fixtures.py
-PYTHONPATH=.vconlib:src:infrastructure/functions/seal \
-    python3 -m pytest tests/test_fixtures.py -q
+python3 frontend/fixtures/generate_fixtures.py
+python3 -m pytest tests/test_fixtures.py -q
 ```
 
-`frontend/fixtures/demo-insecure-do-not-use.jwk` is a **throwaway demo key committed on purpose**
-so the committed JWE and its `content_hash` stay a consistent captured pair (the
-JWE carries a random nonce, so it is only byte-stable when produced once with a
-fixed key). It signs/encrypts nothing real.
+Re-running reuses the committed key but produces new random JWS/JWE bytes, a new vCon
+`uuid`, and a new `content_hash`, so the fixtures show up as modified in `git status`.
+Commit them only if you mean to refresh the fixtures. Delete the key file first to mint a
+brand-new throwaway key.
 
-## Shortcuts (demo) vs. production
+## Shortcuts
 
-- 🩹 **No authentication.** The patient / doctor / analyst "roles" are just
-  which page you open; the doctor/analyst view is a client-side toggle, so
-  anyone who can reach the backend can read either view.
-  → **Production:** real authN/authZ (OIDC + per-role scopes), the full
-  (decrypted) view gated to authorized clinicians and audit-logged.
-- 🩹 **Single-process local app.** One `uvicorn` process serves both the API and
-  the static frontend. → **Production:** a separately deployed, horizontally
-  scalable API behind a gateway, and the frontend served from a CDN/static host.
-- 🩹 **The backend holds the demo key and does all crypto server-side.** It
-  verifies the JWS and decrypts the JWE itself so the browser never sees the key.
-  → **Production:** a managed key service with scoped, audited decryption, and the
-  full record released only to authorized, authenticated clinicians.
-- 🩹 **The live human doctor is stubbed.** The intake is patient ↔ bot only; the
-  doctor is an asynchronous viewer of the produced record, not a second live
-  participant. → **Production:** real live consultations and/or a clinician
-  queue, with the record still produced for the audit trail.
-- 🩹 **Self-signed demo key, shipped with the app**, used for both JWS and JWE,
-  and `frontend/fixtures/demo-insecure-do-not-use.jwk` is committed. → **Production:** AWS KMS /
-  ACM PCA, key rotation, HSM-backed signing, a separate JWE key with least
-  privilege, and never shipping keys with the app.
-- 🩹 **Records are discovered by scanning** the bucket's run-key prefixes (or
-  the single offline fixture), with no pagination. → **Production:** a queryable
-  records index (e.g. DynamoDB) written by the pipeline, with pagination,
-  filtering, and per-role access scoping.
-- 🩹 **The LiveKit browser client is CDN-loaded** (ESM) for a no-build demo, and
-  the patient identity / room are chosen client-side. → **Production:** a
-  pinned, bundled client served from your own origin, and server-minted tokens
-  bound to a verified record.
-- 🩹 **The recording `url` is an `s3://` reference** (not playable in a browser)
-  and no audio is bundled offline, so the audio element may have nothing to play
-  (the medication → audio provenance seek still sets the playhead to the mapped
-  dialog turn start). → **Production:** stream the recording from a signed URL.
-- 🩹 **CORS is wide open** on the backend for local dev. → **Production:**
-  restrict origins to the known frontend origin(s).
+The demo shortcuts in the backend and UI (no authentication, wide-open CORS, scanned
+record listing, role-agnostic audio presign, and so on) are listed with their production
+counterparts in
+[production-considerations.md](production-considerations.md#demo-application).

@@ -31,11 +31,14 @@ What it writes into this directory:
     url:'s3://.../vcon-full.jwe', content_hash:'sha512-...'}. The backend's
     offline fallback serves this as the analyst view.
 
-Run it from the repo root (the seal core is imported via the same ``sys.path``
-shim the pytest suite uses):
+Run it from the repo root with the project installed (``pip install -e .``); the
+seal core is imported via the same ``sys.path`` shim the pytest suite uses, so no
+``PYTHONPATH`` is needed:
 
-    PYTHONPATH=.vconlib:src:infrastructure/functions/seal \
-        python3 frontend/fixtures/generate_fixtures.py
+    python3 frontend/fixtures/generate_fixtures.py
+
+Every run writes new random JWS/JWE bytes and a new vCon uuid, so the committed
+fixtures show up as modified; commit them only when you intend to refresh them.
 
 Re-running with the committed ``demo-insecure-do-not-use.jwk`` present reuses that key
 (so the JWS/JWE are regenerated consistently). Delete the key file first to mint
