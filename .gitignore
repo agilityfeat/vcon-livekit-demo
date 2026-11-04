@@ -16,7 +16,6 @@ __pycache__/
 venv/
 .cfnenv/
 .samenv/
-.vconlib/
 .deps/
 
 # direnv cache
